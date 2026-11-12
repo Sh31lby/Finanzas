@@ -132,6 +132,17 @@ select.inp{-webkit-appearance:none;appearance:none}
 .toast.on{opacity:1;transform:translateX(-50%)}
 .daygroup{font-size:12px;color:var(--muted);margin:14px 2px 2px;text-transform:capitalize}
 .hide{display:none!important}
+.tl-bar{position:relative;display:flex;gap:3px;height:14px;margin:30px 0 8px}
+.tl-bar .tseg{border-radius:7px;overflow:hidden;min-width:0}
+.tl-bar .tseg.cur{background:#4a3d22}.tl-bar .tseg.cur i{display:block;height:100%;background:var(--gold)}
+.tl-bar .tseg.nxt{background:#1f3a33}
+.tl-bar .now{position:absolute;top:-26px;transform:translateX(-50%);font-size:11px;font-weight:700;color:var(--gold2);text-transform:uppercase;letter-spacing:.08em}
+.tl-bar .now::after{content:'';position:absolute;left:50%;top:17px;width:2px;height:23px;margin-left:-1px;background:var(--text);border-radius:1px}
+.tl-lab{display:flex;gap:10px}.tl-lab>div{min-width:0}
+.tl-lab b{display:block;font-size:12px;font-weight:600}.tl-lab span{display:block;font-size:11px;color:var(--muted)}
+.tl-lab .n b{color:var(--green)}
+.cardhint{margin-top:10px;padding:10px 12px;border-radius:12px;background:#231d10;border:1px solid #6b5420;font-size:13px;color:#e9dcc0;line-height:1.45}
+.cardhint b{color:var(--gold2)}
 </style>
 </head>
 <body>
@@ -322,6 +333,23 @@ function cardInfo() {
   return { cur, open, due, total, extra };
 }
 function cardBalance() { return cardInfo().total; }
+function cardTimeline() {
+  const today = todayISO(), sch = cardSchedule();
+  const i = sch.findIndex(p => p.close >= today), cur = sch[i], nxt = sch[i + 1];
+  const st = cardStatements().list, amt = p => (st.find(x => x.close === p.close) || { amount: 0 }).amount;
+  const d1 = daysBetween(cur.start, cur.close) + 1, d2 = daysBetween(nxt.start, nxt.close) + 1;
+  const inCur = Math.max(0, Math.min(1, (daysBetween(cur.start, today) + 0.5) / d1));
+  const markLeft = Math.max(4, Math.min(96, inCur * d1 / (d1 + d2) * 100));
+  const left = daysBetween(today, cur.close);
+  return `<span class="f-lbl" style="margin:18px 0 -14px">Periodos de facturación</span><div class="tl-bar"><div class="tseg cur" style="flex:${d1}"><i style="width:${inCur * 100}%"></i></div><div class="tseg nxt" style="flex:${d2}"></div><div class="now" style="left:${markLeft}%">hoy</div></div>
+    <div class="tl-lab"><div style="flex:${d1}"><b>${dShort(cur.start)} → ${dShort(cur.close)}</b><span>${fmt(amt(cur), 0)} · pagas ${S.card.payMode === 'banco' ? dShort(cur.pay) : '~' + dShort(plannedPay(cur))}</span></div>
+    <div class="n" style="flex:${d2}"><b>${dShort(nxt.start)} → ${dShort(nxt.close)}</b><span>${fmt(amt(nxt), 0)} · pagas ${S.card.payMode === 'banco' ? dShort(nxt.pay) : '~' + dShort(plannedPay(nxt))}</span></div></div>
+    <div class="cardhint">Si compras <b>hoy</b>, lo pagas <b>${payTxt(cur)}</b>. ${left > 0 ? `Desde el <b>${dShort(nxt.start)}</b> (en ${left} día${left > 1 ? 's' : ''})` : '<b>Hoy cierra el periodo</b>: desde mañana'}, tus compras pasan al pago <b>${payTxt(nxt)}</b>.</div>`;
+}
+function cardHint(dateISO) {
+  const p = periodOf(dateISO || todayISO());
+  return `Esta compra entra al periodo del <b>${dShort(p.start)} al ${dShort(p.close)}</b> → la pagas <b>${payTxt(p)}</b>${S.card.payMode === 'banco' ? '' : ' (vence ' + dShort(p.pay) + ')'}.`;
+}
 // Cuándo pagas un estado de cuenta: con tu sueldo (primer día de cobro después del cierre) o en la fecha del banco
 function plannedPay(p) {
   if (S.card.payMode === 'banco') return p.pay;
@@ -511,7 +539,9 @@ function movRow(m) {
     <div class="amt neutral">${m.amount >= 0 ? '+' : '−'}${fmt(Math.abs(m.amount))}</div></div>`;
   const isIn = m.type === 'ingreso', isPay = m.type === 'pago_tarjeta';
   const title = isPay ? 'Pago de tarjeta' : m.category;
-  const sub = [dShort(m.date), m.note, isIn ? null : m.method, m.auto ? 'fijo' : null].filter(Boolean).map(esc).join(' · ');
+  const tc = m.type === 'gasto' && m.method === 'Tarjeta de crédito';
+  const sub = [dShort(m.date), m.note, isIn ? null : m.method, m.auto ? 'fijo' : null].filter(Boolean).map(esc).join(' · ')
+    + (tc ? ` · <span style="color:var(--gold)">se paga ${S.card.payMode === 'banco' ? dShort(periodOf(m.date).pay) : '~' + dShort(plannedPay(periodOf(m.date)))}</span>` : '');
   const col = isPay ? '#5f584f' : isIn ? 'var(--green)' : colorOf(m.category);
   return `<div class="row tap" data-act="edit" data-id="${m.id}"><i class="dot" style="background:${col}"></i><div class="t"><b>${esc(title)}</b><span>${sub}</span></div>
     <div class="amt ${isIn ? 'in' : isPay ? 'neutral' : ''}">${isIn ? '+' : '−'}${fmt(m.amount).replace('S/ ', 'S/ ')}</div></div>`;
@@ -579,14 +609,14 @@ function vInicio() {
     <div class="card kpi"><div class="lbl">Gastos del mes</div><div class="v">${fmtH(t.exp)}</div><div class="note">balance <span style="color:${t.left < 0 ? 'var(--red)' : 'var(--text)'}">${fmt(t.left, 0)}</span></div></div>
   </div>
   ${cur ? `<div class="sub" style="margin:-4px 4px 12px">Tu mes va del ${c.label.replace(' – ', ' al ')} · ${daysLeft(c).toLowerCase()}</div>` : ''}
-  <div class="grid2">
-    <div class="card tap" data-act="goto" data-v="deudas"><div class="lbl">Tarjeta de crédito</div><div class="sub" style="font-size:11px">consumo hasta ${dShort(ci.cur.close)}</div><div class="kpi"><div class="v" style="font-size:20px;margin-top:2px">${fmtH(cb)}</div></div>
-      <div class="bar ${capPct > 100 ? 'over' : capPct >= 80 ? 'warn' : ''}"><i style="width:${Math.min(100, capPct)}%"></i></div>
-      <div class="note sub mt8">${cb > S.card.cap ? `<span style="color:var(--red)">te pasaste ${fmt(cb - S.card.cap, 0)}</span>` : `quedan ${fmt(S.card.cap - cb, 0)} de tu tope`} · la pagas ${payTxt(ci.cur)}</div>
-      ${ci.due.length ? `<div class="note mt8" style="color:var(--gold);font-size:12px">por pagar ${fmt(ci.due[0].left, 0)} el ${dShort(ci.due[0].pay)}</div>` : ''}</div>
-    <div class="card"><div class="lbl">Tarjeta alimentos</div><div class="kpi"><div class="v" style="font-size:20px;${fb < 0 ? 'color:var(--red)' : ''}">${fmtH(fb)}</div></div>
-      <div class="note sub mt8">solo súper y comidas</div></div>
+  <div class="card"><h2>Tarjeta de crédito <button data-act="goto" data-v="deudas">Detalle</button></h2>
+    <div style="display:flex;justify-content:space-between;align-items:flex-end;gap:10px"><div><div class="sub">consumo hasta el ${dShort(ci.cur.close)}</div><div class="big" style="font-size:26px">${fmtH(cb)}</div></div>
+      <div class="sub" style="text-align:right">${cb > S.card.cap ? `<span style="color:var(--red)">te pasaste ${fmt(cb - S.card.cap, 0)}</span>` : `quedan ${fmt(S.card.cap - cb, 0)}<br>de tu tope ${fmt(S.card.cap, 0)}`}</div></div>
+    <div class="bar ${capPct > 100 ? 'over' : capPct >= 80 ? 'warn' : ''}"><i style="width:${Math.min(100, capPct)}%"></i></div>
+    ${ci.due.length ? `<div class="note mt8" style="color:var(--gold);font-size:13px">Por pagar: ${fmt(ci.due[0].left, 0)} ${payTxt(ci.due[0])}</div>` : ''}
+    ${cardTimeline()}
   </div>
+  <div class="card" style="display:flex;justify-content:space-between;align-items:center"><div><div class="lbl">Tarjeta alimentos</div><div class="sub">solo súper y comidas</div></div><div class="big" style="font-size:22px;${fb < 0 ? 'color:var(--red)' : ''}">${fmtH(fb)}</div></div>
   <div class="card"><h2>Gastos por categoría</h2>${donut(t.byCat, t.exp)}</div>
   <div class="card"><h2>Últimos 6 meses</h2>${bars()}</div>
   ${fx}
@@ -646,7 +676,8 @@ function vDeudas() {
       • Pide tu nuevo cronograma y actualiza aquí el capital en Ajustes.</div>
   </div>` : ''}
   <div class="card"><h2>Tarjeta de crédito <button data-act="goto" data-v="ajustes">Actualizar</button></h2>
-    <div class="lbl" style="letter-spacing:.06em">Consumo del ${dShort(ci.cur.start)} al ${dShort(ci.cur.close)}</div><div class="big">${fmtH(ci.open.amount)}</div>
+    ${cardTimeline()}
+    <div class="lbl mt" style="letter-spacing:.06em">Consumo del ${dShort(ci.cur.start)} al ${dShort(ci.cur.close)}</div><div class="big">${fmtH(ci.open.amount)}</div>
     <div class="bar ${capPct > 100 ? 'over' : capPct >= 80 ? 'warn' : ''}"><i style="width:${Math.min(100, capPct)}%"></i></div>
     <div class="stats">
       <div><span>Tu tope</span><b>${fmt(S.card.cap, 0)}</b></div>
@@ -726,7 +757,7 @@ function vAjustes() {
     <div class="sub" style="margin-bottom:12px">Tus datos viven solo en este iPhone. Guarda una copia en Archivos o iCloud de vez en cuando.</div>
     <div class="cta"><button class="btn gold" data-act="export">Exportar copia</button><button class="btn" data-act="import">Importar copia</button><button class="btn" data-act="csv">Exportar a Excel (CSV)</button></div>
     <button class="btn danger block mt" data-act="reset">Borrar todo</button></div>
-  <div class="sub" style="text-align:center;margin:18px 0">Finanzas · v4</div>`;
+  <div class="sub" style="text-align:center;margin:18px 0">Finanzas · v5</div>`;
 }
 
 /* ================= Formularios ================= */
@@ -746,6 +777,7 @@ function drawMovForm() {
     <input class="amount" id="f-amount" inputmode="decimal" placeholder="S/ 0.00" value="${m.amount === '' ? '' : m.amount}" autocomplete="off">
     ${special ? '' : `<span class="f-lbl">Categoría</span><div class="chips">${cats.map(c => `<button class="chip ${c === m.category ? 'on' : ''}" data-act="fcat" data-v="${esc(c)}">${esc(c)}</button>`).join('')}</div>`}
     ${isG ? `<span class="f-lbl">Pagado con</span><div class="chips">${METHODS.map(x => `<button class="chip ${x === m.method ? 'on' : ''}" data-act="fmethod" data-v="${x}">${x}</button>`).join('')}</div>` : ''}
+    ${isG && m.method === 'Tarjeta de crédito' ? `<div class="cardhint" id="cardHint">${cardHint(m.date)}</div>` : ''}
     ${warn ? `<div class="warnmsg">La tarjeta de alimentos solo sirve en supermercados y comida.</div>` : ''}
     <span class="f-lbl">Fecha</span><input class="inp" type="date" id="f-date" value="${m.date}">
     <span class="f-lbl">Nota (opcional)</span><input class="inp" id="f-note" placeholder="ej. Plaza Vea, almuerzo, taxi…" value="${esc(m.note)}">
@@ -947,7 +979,11 @@ document.addEventListener('click', e => {
   const a = e.target.closest('[data-act]');
   if (a && actions[a.dataset.act]) { e.preventDefault(); actions[a.dataset.act](a); }
 });
-document.addEventListener('input', e => { if (e.target.id === 'simRange') updateSim(); });
+document.addEventListener('input', e => {
+  if (e.target.id === 'simRange') updateSim();
+  if (e.target.id === 'f-date' && $('#cardHint')) $('#cardHint').innerHTML = cardHint(e.target.value);
+});
+document.addEventListener('change', e => { if (e.target.id === 'f-date' && $('#cardHint')) $('#cardHint').innerHTML = cardHint(e.target.value); });
 document.addEventListener('keydown', e => { if (e.key === 'Enter' && sheetCtx && e.target.tagName === 'INPUT') { e.preventDefault(); ({ fixed: actions.xsave, cash: actions.cashsave }[sheetCtx.kind] || actions.fsave)(); } });
 $('#scrim').addEventListener('click', closeSheet);
 $('#fab').addEventListener('click', () => movForm({ date: off === 0 ? todayISO() : cycle(off).end }));
