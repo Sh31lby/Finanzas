@@ -203,7 +203,7 @@ function defaults() {
       { id:'f-netflix', name:'Netflix', amount:60, day:28, category:'Suscripciones', method:'Tarjeta de crédito', active:true },
       { id:'f-credito', name:'Cuota crédito efectivo', amount:372.80, day:30, category:'Deudas', method:'Débito', active:true, loan:true }
     ],
-    card: { limit:4000, cap:1000, base:745, baseAt: now, payDay:30 },
+    card: { limit:4000, cap:1000, openBase:745, openClose:'2026-11-25', prevBase:0, prevClose:'2026-10-23', baseAt: now, closeDay:25 },
     food: { base:0, baseAt: now },
     loan: { name:'Crédito efectivo', original:3100, capital:3020.86, tea:80.90, cuota:372.80, cuotas:12, next:'2026-11-30', baseAt: now }
   };
@@ -217,7 +217,10 @@ function load() {
   try { S = JSON.parse(localStorage.getItem(KEY)); } catch (e) { S = null; }
   if (!S || !Array.isArray(S.movements)) S = defaults();
   S.skips = S.skips || [];
-  if (!S.card.payDay) S.card.payDay = 30;
+  if (S.card.openClose === undefined) { // de v1/v2: los S/ 745 eran consumos del periodo que cierra el 25 nov
+    Object.assign(S.card, { openBase: S.card.base || 0, openClose: '2026-11-25', prevBase: 0, prevClose: '2026-10-23', closeDay: 25 });
+    delete S.card.base; delete S.card.payDay; save();
+  }
 }
 function save() {
   try { localStorage.setItem(KEY, JSON.stringify(S)); }
@@ -260,15 +263,64 @@ function totals(c) {
   }
   return { inc, exp, left: inc - exp, food, byCat };
 }
-function cardBalance() {
-  let b = S.card.base;
-  for (const m of S.movements) {
-    if ((m.created || 0) <= S.card.baseAt) continue;
-    if (m.type === 'gasto' && m.method === 'Tarjeta de crédito') b += m.amount;
-    if (m.type === 'pago_tarjeta') b -= m.amount;
+/* ---------- Tarjeta de crédito: cierres y pagos (cronograma BCP, cierre 25) ---------- */
+const BCP_2026 = [
+  ['2026-01-23','2026-02-23'],['2026-02-25','2026-03-23'],['2026-03-25','2026-04-21'],['2026-04-24','2026-05-20'],
+  ['2026-05-25','2026-06-22'],['2026-06-25','2026-07-21'],['2026-07-24','2026-08-20'],['2026-08-25','2026-09-22'],
+  ['2026-09-25','2026-10-20'],['2026-10-23','2026-11-23'],['2026-11-25','2026-12-22'],['2026-12-24','2027-01-20']
+];
+const weekdayBack = d => { while (d.getDay() === 0 || d.getDay() === 6) d = addDays(d, -1); return d; };
+const weekdayFwd = d => { while (d.getDay() === 0 || d.getDay() === 6) d = addDays(d, 1); return d; };
+function cardSchedule() {
+  const known = (S.card.schedule || BCP_2026).map(([close, pay]) => ({ close, pay, approx: false }));
+  const out = [...known];
+  // meses sin cronograma: cierre ~25 (día hábil anterior), pago ~20 del mes siguiente (aprox., conservador)
+  let last = parse(out[out.length - 1].close);
+  const limit = addDays(new Date(), 400);
+  while (last < limit) {
+    const close = weekdayBack(clampDate(last.getFullYear(), last.getMonth() + 1, S.card.closeDay || 25));
+    const pay = weekdayFwd(clampDate(close.getFullYear(), close.getMonth() + 1, 20));
+    out.push({ close: iso(close), pay: iso(pay), approx: true });
+    last = close;
   }
-  return Math.round(b * 100) / 100;
+  out.forEach((p, i) => { p.start = i ? iso(addDays(parse(out[i - 1].close), 1)) : iso(addDays(parse(p.close), -30)); });
+  return out;
 }
+function periodOf(dateISO) {
+  const sch = cardSchedule();
+  return sch.find(p => p.close >= dateISO) || sch[sch.length - 1];
+}
+// Estados de cuenta: consumo de cada periodo y cuánto falta pagar (los pagos se aplican al más antiguo)
+function cardStatements() {
+  const C = S.card, map = new Map();
+  const get = close => { if (!map.has(close)) { const p = cardSchedule().find(x => x.close === close) || periodOf(close); map.set(close, { ...p, amount: 0 }); } return map.get(close); };
+  if (C.openBase) get(C.openClose).amount += C.openBase;
+  if (C.prevBase) get(C.prevClose).amount += C.prevBase;
+  let payments = 0;
+  for (const m of S.movements) {
+    if ((m.created || 0) <= C.baseAt) continue;
+    if (m.type === 'gasto' && m.method === 'Tarjeta de crédito') get(periodOf(m.date).close).amount += m.amount;
+    if (m.type === 'pago_tarjeta') payments += m.amount;
+  }
+  const today = todayISO();
+  const list = [...map.values()].sort((a, b) => a.close.localeCompare(b.close));
+  for (const s of list) {
+    s.amount = Math.round(s.amount * 100) / 100;
+    const p = Math.min(payments, s.amount); s.paid = p; payments -= p;
+    s.left = Math.round((s.amount - p) * 100) / 100;
+    s.closed = today > s.close;
+  }
+  const extra = Math.round(payments * 100) / 100; // pagado de más (a favor)
+  return { list, extra };
+}
+function cardInfo() {
+  const today = todayISO(), cur = periodOf(today), { list, extra } = cardStatements();
+  const open = list.find(s => s.close === cur.close) || { ...cur, amount: 0, left: 0, paid: 0, closed: false };
+  const due = list.filter(s => s.closed && s.left > 0);
+  const total = Math.round((list.reduce((a, s) => a + s.left, 0) - extra) * 100) / 100;
+  return { cur, open, due, total, extra };
+}
+function cardBalance() { return cardInfo().total; }
 function foodBalance() {
   let b = S.food.base;
   for (const m of S.movements) {
@@ -321,12 +373,12 @@ function upcoming() {
     }
   }
   // pago de la tarjeta de crédito
-  const cardDue = iso(clampDate(now.getFullYear(), now.getMonth(), S.card.payDay));
-  const monthStart = iso(new Date(now.getFullYear(), now.getMonth(), 1));
-  const cb = cardBalance();
-  const paidCard = S.movements.some(m => m.type === 'pago_tarjeta' && m.date >= monthStart && m.date <= monthEnd);
-  if (cardDue >= today && cardDue <= monthEnd && cb > 0 && !paidCard)
-    items.push({ label: 'Pago tarjeta de crédito', date: cardDue, amount: -cb, note: dShort(cardDue) + ' · deuda actual', color: 'var(--gold)' });
+  for (const s of cardStatements().list) {
+    if (s.left <= 0 || s.pay > monthEnd) continue;
+    const late = s.pay < today;
+    items.push({ label: 'Pago tarjeta de crédito', date: late ? today : s.pay, amount: -s.left,
+      note: (late ? 'vencido el ' : '') + dShort(s.pay) + ' · consumos hasta ' + dShort(s.close) + (s.closed ? '' : ' (aún sumando)'), color: 'var(--gold)' });
+  }
   items.sort((a, b) => a.date.localeCompare(b.date) || b.amount - a.amount);
   const cash = cashBalance();
   const end = Math.round((cash + items.reduce((s, x) => s + x.amount, 0)) * 100) / 100;
@@ -455,7 +507,7 @@ function movRow(m) {
 function vInicio() {
   const c = cycle(off), t = totals(c), cur = off === 0;
   const now = new Date();
-  const cb = cardBalance(), capPct = cb / S.card.cap * 100;
+  const ci = cardInfo(), cb = ci.open.amount, capPct = cb / S.card.cap * 100;
   const fb = foodBalance();
   const recent = S.movements.filter(m => inCycle(m, c)).sort((a, b) => b.date.localeCompare(a.date) || b.created - a.created).slice(0, 6);
 
@@ -483,6 +535,10 @@ function vInicio() {
         ${u.items.length ? '' : `<div class="sub" style="padding:6px 0 10px">No tienes pagos pendientes antes del ${dShort(u.monthEnd)}.</div>`}
         <div class="row" style="border-top:1px solid var(--line2)"><div class="t"><b style="font-size:16px">Te quedaría</b><span>al ${dShort(u.monthEnd)}, sin contar gastos nuevos</span></div><div class="amt" style="font-size:19px;color:${u.end < 0 ? 'var(--red)' : 'var(--gold2)'}">${fmt(u.end)}</div></div>
         <div class="sub mt8">Tus compras con tarjeta de crédito no bajan tu saldo hoy: salen el día que pagas la tarjeta.</div>
+        ${(() => {
+          const nx = cardStatements().list.find(s => s.left > 0 && s.pay > u.monthEnd);
+          return nx ? `<div class="info mt">Después: el <b>${dShort(nx.pay)}</b> pagas la tarjeta, <b>${fmt(nx.left, 0)}</b>${nx.closed ? '' : ' y sumando hasta el ' + dShort(nx.close)}. Esa fecha cae antes de tu sueldo: sepáralo de este sueldo.</div>` : '';
+        })()}
       </div>`;
   }
 
@@ -512,9 +568,10 @@ function vInicio() {
   </div>
   ${cur ? `<div class="sub" style="margin:-4px 4px 12px">Tu mes va del ${c.label.replace(' – ', ' al ')} · ${daysLeft(c).toLowerCase()}</div>` : ''}
   <div class="grid2">
-    <div class="card tap" data-act="goto" data-v="deudas"><div class="lbl">Tarjeta de crédito</div><div class="kpi"><div class="v" style="font-size:20px">${fmtH(cb)}</div></div>
+    <div class="card tap" data-act="goto" data-v="deudas"><div class="lbl">Tarjeta de crédito</div><div class="sub" style="font-size:11px">consumo hasta ${dShort(ci.cur.close)}</div><div class="kpi"><div class="v" style="font-size:20px;margin-top:2px">${fmtH(cb)}</div></div>
       <div class="bar ${capPct > 100 ? 'over' : capPct >= 80 ? 'warn' : ''}"><i style="width:${Math.min(100, capPct)}%"></i></div>
-      <div class="note sub mt8">${cb > S.card.cap ? `te pasaste ${fmt(cb - S.card.cap, 0)}` : `quedan ${fmt(S.card.cap - cb, 0)} de tu tope`}</div></div>
+      <div class="note sub mt8">${cb > S.card.cap ? `<span style="color:var(--red)">te pasaste ${fmt(cb - S.card.cap, 0)}</span>` : `quedan ${fmt(S.card.cap - cb, 0)} de tu tope`} · pagas el ${dShort(ci.cur.pay)}</div>
+      ${ci.due.length ? `<div class="note mt8" style="color:var(--gold);font-size:12px">por pagar ${fmt(ci.due[0].left, 0)} el ${dShort(ci.due[0].pay)}</div>` : ''}</div>
     <div class="card"><div class="lbl">Tarjeta alimentos</div><div class="kpi"><div class="v" style="font-size:20px;${fb < 0 ? 'color:var(--red)' : ''}">${fmtH(fb)}</div></div>
       <div class="note sub mt8">solo súper y comidas</div></div>
   </div>
@@ -549,7 +606,8 @@ function vMovs() {
 function vDeudas() {
   const L = S.loan, ls = loanState();
   const paidPct = L.original > 0 ? (1 - ls.cap / L.original) * 100 : 0;
-  const cb = cardBalance(), capPct = cb / S.card.cap * 100;
+  const ci = cardInfo(), capPct = ci.open.amount / S.card.cap * 100;
+  const today0 = todayISO(), sch = cardSchedule().filter(p => p.close >= today0).slice(0, 3);
   const twoCuotas = L.cuota * 2;
   return `<header class="top"><div><div class="sub">Crédito y tarjeta</div><h1>Deudas</h1></div></header>
   <div class="card"><h2>${esc(L.name)} <button data-act="goto" data-v="ajustes">Actualizar</button></h2>
@@ -575,16 +633,24 @@ function vDeudas() {
       • Elige <b>reducir el plazo</b> (mantener la cuota): es lo que más intereses ahorra.<br>
       • Pide tu nuevo cronograma y actualiza aquí el capital en Ajustes.</div>
   </div>` : ''}
-  <div class="card"><h2>Tarjeta de crédito</h2>
-    <div class="lbl" style="letter-spacing:.06em">Deuda actual</div><div class="big">${fmtH(cb)}</div>
+  <div class="card"><h2>Tarjeta de crédito <button data-act="goto" data-v="ajustes">Actualizar</button></h2>
+    <div class="lbl" style="letter-spacing:.06em">Consumo del ${dShort(ci.cur.start)} al ${dShort(ci.cur.close)}</div><div class="big">${fmtH(ci.open.amount)}</div>
     <div class="bar ${capPct > 100 ? 'over' : capPct >= 80 ? 'warn' : ''}"><i style="width:${Math.min(100, capPct)}%"></i></div>
     <div class="stats">
       <div><span>Tu tope</span><b>${fmt(S.card.cap, 0)}</b></div>
-      <div><span>${cb > S.card.cap ? 'Te pasaste' : 'Te queda para tu tope'}</span><b style="color:${cb > S.card.cap ? 'var(--red)' : 'var(--text)'}">${fmt(Math.abs(S.card.cap - cb), 0)}</b></div>
-      <div><span>Línea total</span><b>${fmt(S.card.limit, 0)}</b></div>
-      <div><span>Línea disponible</span><b>${fmt(S.card.limit - cb, 0)}</b></div>
+      <div><span>${ci.open.amount > S.card.cap ? 'Te pasaste' : 'Te queda para tu tope'}</span><b style="color:${ci.open.amount > S.card.cap ? 'var(--red)' : 'var(--text)'}">${fmt(Math.abs(S.card.cap - ci.open.amount), 0)}</b></div>
+      <div><span>Cierra</span><b>${dShort(ci.cur.close)}</b></div>
+      <div><span>Lo pagas el</span><b>${dShort(ci.cur.pay)}${ci.cur.approx ? ' (aprox.)' : ''}</b></div>
     </div>
-    <div class="info mt">Paga siempre el <b>total del mes</b>, no el mínimo: así la tarjeta no te cobra intereses. Las compras con tarjeta ya cuentan como gasto el día que las haces; el pago de la tarjeta no se vuelve a contar.</div>
+    ${ci.due.length ? `<span class="f-lbl">Estados de cuenta por pagar</span>${ci.due.map(s => `<div class="row"><i class="dot" style="background:${s.pay < todayISO() ? 'var(--red)' : 'var(--gold)'}"></i><div class="t"><b>Pagar el ${dShort(s.pay)}</b><span>consumos del ${dShort(s.start)} al ${dShort(s.close)}${s.pay < todayISO() ? ' · VENCIDO' : ''}</span></div><div class="amt">${fmt(s.left)}</div></div>`).join('')}` : ''}
+    <div class="stats" style="border-top:1px solid var(--line);padding-top:12px">
+      <div><span>Deuda total</span><b>${fmt(ci.total)}</b></div>
+      <div><span>Línea disponible</span><b>${fmt(S.card.limit - ci.total, 0)} <span style="display:inline;color:var(--muted)">de ${fmt(S.card.limit, 0)}</span></b></div>
+    </div>
+    <span class="f-lbl">Próximas fechas</span>
+    ${sch.map(p => `<div class="row"><div class="t"><b>Cierre ${dShort(p.close)}</b><span>consumos desde ${dShort(p.start)}</span></div><div class="amt neutral">pago ${dShort(p.pay)}${p.approx ? '*' : ''}</div></div>`).join('')}
+    ${sch.some(p => p.approx) ? '<div class="sub">* aprox.: pásame el cronograma BCP 2027 cuando llegue.</div>' : ''}
+    <div class="info mt">• Tu tarjeta se paga entre el <b>20 y el 23</b>, <b>antes de tu sueldo</b>: separa ese monto apenas cobres.<br>• Paga siempre el <b>total facturado</b>, no el mínimo, o te cobran intereses.<br>• Si la fecha cae fin de semana o feriado, pasa al siguiente día útil.</div>
     <div class="cta mt"><button class="btn gold" data-act="cardpay">Registrar pago de tarjeta</button></div>
   </div>`;
 }
@@ -624,8 +690,9 @@ function vAjustes() {
   <div class="card"><h2>Tarjeta de crédito</h2>
     ${sr('c-limit', 'Línea total', S.card.limit.toFixed(2))}
     ${sr('c-cap', 'Mi tope personal', S.card.cap.toFixed(2))}
-    ${sr('c-bal', 'Deuda actual (según el banco)', cardBalance().toFixed(2))}
-    <div class="setrow"><label for="c-payday">Día de pago de la tarjeta</label><input class="inp" id="c-payday" type="number" min="1" max="31" value="${S.card.payDay}" style="width:80px"></div>
+    ${(() => { const ci = cardInfo(); return sr('c-open', `Consumo del ${dShort(ci.cur.start)} al ${dShort(ci.cur.close)}<br><span class="sub">lo pagas el ${dShort(ci.cur.pay)}</span>`, ci.open.amount.toFixed(2))
+      + sr('c-prev', 'Pendiente de estados ya cerrados<br><span class="sub">pon 0 si ya pagaste todo</span>', ci.due.reduce((a, s) => a + s.left, 0).toFixed(2)); })()}
+    <div class="sub mt8">Fechas de cierre y pago según tu cronograma BCP 2026 (cierre 25).</div>
     <button class="btn block mt" data-act="savecard">Guardar</button></div>
   <div class="card"><h2>Tarjeta alimentos</h2>
     ${sr('a-bal', 'Saldo actual', foodBalance().toFixed(2))}
@@ -645,7 +712,7 @@ function vAjustes() {
     <div class="sub" style="margin-bottom:12px">Tus datos viven solo en este iPhone. Guarda una copia en Archivos o iCloud de vez en cuando.</div>
     <div class="cta"><button class="btn gold" data-act="export">Exportar copia</button><button class="btn" data-act="import">Importar copia</button><button class="btn" data-act="csv">Exportar a Excel (CSV)</button></div>
     <button class="btn danger block mt" data-act="reset">Borrar todo</button></div>
-  <div class="sub" style="text-align:center;margin:18px 0">Finanzas · v2</div>`;
+  <div class="sub" style="text-align:center;margin:18px 0">Finanzas · v3</div>`;
 }
 
 /* ================= Formularios ================= */
@@ -677,7 +744,7 @@ function readMovForm() {
   m.amount = $('#f-amount').value; m.date = $('#f-date').value || todayISO(); m.note = $('#f-note').value.trim();
 }
 function cardPayForm(m) {
-  sheetCtx = { kind: 'card', m: Object.assign({ type: 'pago_tarjeta', amount: cardBalance() > 0 ? cardBalance() : '', method: 'Débito', date: todayISO(), note: '' }, m) };
+  sheetCtx = { kind: 'card', m: Object.assign({ type: 'pago_tarjeta', amount: (() => { const ci = cardInfo(); const v = ci.due.length ? ci.due[0].left : ci.open.left; return v > 0 ? v : ''; })(), method: 'Débito', date: todayISO(), note: '' }, m) };
   const x = sheetCtx.m, edit = !!x.id;
   openSheet(`<h3>${edit ? 'Editar pago de tarjeta' : 'Pago de tarjeta'}<button data-act="close">Cerrar</button></h3>
     <input class="amount" id="f-amount" inputmode="decimal" placeholder="S/ 0.00" value="${x.amount}">
@@ -818,10 +885,13 @@ const actions = {
     save(); render(); toast('Guardado');
   },
   savecard() {
-    const l = num($('#c-limit').value), c = num($('#c-cap').value), b = num($('#c-bal').value);
+    const l = num($('#c-limit').value), c = num($('#c-cap').value), o = num($('#c-open').value), pv = num($('#c-prev').value);
     if (l > 0) S.card.limit = l; if (c > 0) S.card.cap = c;
-    const pd = parseInt($('#c-payday').value); if (pd >= 1 && pd <= 31) S.card.payDay = pd;
-    if (b >= 0 && b !== cardBalance()) { S.card.base = b; S.card.baseAt = Date.now(); }
+    const ci = cardInfo(), dueNow = Math.round(ci.due.reduce((a, s) => a + s.left, 0) * 100) / 100;
+    if (o >= 0 && pv >= 0 && (o !== ci.open.amount || pv !== dueNow)) {
+      const sch = cardSchedule(), idx = sch.findIndex(p => p.close === ci.cur.close);
+      Object.assign(S.card, { openBase: o, openClose: ci.cur.close, prevBase: pv, prevClose: (sch[idx - 1] || ci.cur).close, baseAt: Date.now() });
+    }
     save(); render(); toast('Tarjeta actualizada');
   },
   savefood() {
