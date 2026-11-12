@@ -203,7 +203,7 @@ function defaults() {
       { id:'f-netflix', name:'Netflix', amount:60, day:28, category:'Suscripciones', method:'Tarjeta de crédito', active:true },
       { id:'f-credito', name:'Cuota crédito efectivo', amount:372.80, day:30, category:'Deudas', method:'Débito', active:true, loan:true }
     ],
-    card: { limit:4000, cap:1000, openBase:745, openClose:'2026-11-25', prevBase:0, prevClose:'2026-10-23', baseAt: now, closeDay:25 },
+    card: { limit:4000, cap:1000, openBase:745, openClose:'2026-11-25', prevBase:0, prevClose:'2026-10-23', baseAt: now, closeDay:25, payMode:'sueldo' },
     food: { base:0, baseAt: now },
     loan: { name:'Crédito efectivo', original:3100, capital:3020.86, tea:80.90, cuota:372.80, cuotas:12, next:'2026-11-30', baseAt: now }
   };
@@ -221,6 +221,7 @@ function load() {
     Object.assign(S.card, { openBase: S.card.base || 0, openClose: '2026-11-25', prevBase: 0, prevClose: '2026-10-23', closeDay: 25 });
     delete S.card.base; delete S.card.payDay; save();
   }
+  if (!S.card.payMode) S.card.payMode = 'sueldo';
 }
 function save() {
   try { localStorage.setItem(KEY, JSON.stringify(S)); }
@@ -321,6 +322,15 @@ function cardInfo() {
   return { cur, open, due, total, extra };
 }
 function cardBalance() { return cardInfo().total; }
+// Cuándo pagas un estado de cuenta: con tu sueldo (primer día de cobro después del cierre) o en la fecha del banco
+function plannedPay(p) {
+  if (S.card.payMode === 'banco') return p.pay;
+  const day = S.settings.cycleDay, c = parse(p.close);
+  let d = clampDate(c.getFullYear(), c.getMonth(), day);
+  if (iso(d) <= p.close) d = clampDate(c.getFullYear(), c.getMonth() + 1, day);
+  return iso(d) < p.pay ? iso(d) : p.pay;
+}
+const payTxt = p => S.card.payMode === 'banco' ? 'el ' + dShort(p.pay) : 'con tu sueldo (~' + dShort(plannedPay(p)) + ')';
 function foodBalance() {
   let b = S.food.base;
   for (const m of S.movements) {
@@ -374,10 +384,12 @@ function upcoming() {
   }
   // pago de la tarjeta de crédito
   for (const s of cardStatements().list) {
-    if (s.left <= 0 || s.pay > monthEnd) continue;
-    const late = s.pay < today;
-    items.push({ label: 'Pago tarjeta de crédito', date: late ? today : s.pay, amount: -s.left,
-      note: (late ? 'vencido el ' : '') + dShort(s.pay) + ' · consumos hasta ' + dShort(s.close) + (s.closed ? '' : ' (aún sumando)'), color: 'var(--gold)' });
+    const plan = plannedPay(s);
+    if (s.left <= 0 || plan > monthEnd) continue;
+    const late = s.pay < today, behind = !late && plan < today;
+    items.push({ label: 'Pago tarjeta de crédito', date: late || behind ? today : plan, amount: -s.left,
+      note: late ? 'VENCIDO el ' + dShort(s.pay) : (S.card.payMode === 'banco' ? dShort(plan) : 'con tu sueldo') + (s.closed ? ' · vence ' + dShort(s.pay) : ' · suma hasta el ' + dShort(s.close)),
+      color: late ? 'var(--red)' : 'var(--gold)' });
   }
   items.sort((a, b) => a.date.localeCompare(b.date) || b.amount - a.amount);
   const cash = cashBalance();
@@ -536,8 +548,8 @@ function vInicio() {
         <div class="row" style="border-top:1px solid var(--line2)"><div class="t"><b style="font-size:16px">Te quedaría</b><span>al ${dShort(u.monthEnd)}, sin contar gastos nuevos</span></div><div class="amt" style="font-size:19px;color:${u.end < 0 ? 'var(--red)' : 'var(--gold2)'}">${fmt(u.end)}</div></div>
         <div class="sub mt8">Tus compras con tarjeta de crédito no bajan tu saldo hoy: salen el día que pagas la tarjeta.</div>
         ${(() => {
-          const nx = cardStatements().list.find(s => s.left > 0 && s.pay > u.monthEnd);
-          return nx ? `<div class="info mt">Después: el <b>${dShort(nx.pay)}</b> pagas la tarjeta, <b>${fmt(nx.left, 0)}</b>${nx.closed ? '' : ' y sumando hasta el ' + dShort(nx.close)}. Esa fecha cae antes de tu sueldo: sepáralo de este sueldo.</div>` : '';
+          const nx = cardStatements().list.find(s => s.left > 0 && plannedPay(s) > u.monthEnd);
+          return nx ? `<div class="sub mt8">Siguiente pago de tarjeta: <b style="color:var(--text)">${fmt(nx.left, 0)}</b>${nx.closed ? '' : ' y sumando hasta el ' + dShort(nx.close)}, ${payTxt(nx)}.</div>` : '';
         })()}
       </div>`;
   }
@@ -570,7 +582,7 @@ function vInicio() {
   <div class="grid2">
     <div class="card tap" data-act="goto" data-v="deudas"><div class="lbl">Tarjeta de crédito</div><div class="sub" style="font-size:11px">consumo hasta ${dShort(ci.cur.close)}</div><div class="kpi"><div class="v" style="font-size:20px;margin-top:2px">${fmtH(cb)}</div></div>
       <div class="bar ${capPct > 100 ? 'over' : capPct >= 80 ? 'warn' : ''}"><i style="width:${Math.min(100, capPct)}%"></i></div>
-      <div class="note sub mt8">${cb > S.card.cap ? `<span style="color:var(--red)">te pasaste ${fmt(cb - S.card.cap, 0)}</span>` : `quedan ${fmt(S.card.cap - cb, 0)} de tu tope`} · pagas el ${dShort(ci.cur.pay)}</div>
+      <div class="note sub mt8">${cb > S.card.cap ? `<span style="color:var(--red)">te pasaste ${fmt(cb - S.card.cap, 0)}</span>` : `quedan ${fmt(S.card.cap - cb, 0)} de tu tope`} · la pagas ${payTxt(ci.cur)}</div>
       ${ci.due.length ? `<div class="note mt8" style="color:var(--gold);font-size:12px">por pagar ${fmt(ci.due[0].left, 0)} el ${dShort(ci.due[0].pay)}</div>` : ''}</div>
     <div class="card"><div class="lbl">Tarjeta alimentos</div><div class="kpi"><div class="v" style="font-size:20px;${fb < 0 ? 'color:var(--red)' : ''}">${fmtH(fb)}</div></div>
       <div class="note sub mt8">solo súper y comidas</div></div>
@@ -640,17 +652,18 @@ function vDeudas() {
       <div><span>Tu tope</span><b>${fmt(S.card.cap, 0)}</b></div>
       <div><span>${ci.open.amount > S.card.cap ? 'Te pasaste' : 'Te queda para tu tope'}</span><b style="color:${ci.open.amount > S.card.cap ? 'var(--red)' : 'var(--text)'}">${fmt(Math.abs(S.card.cap - ci.open.amount), 0)}</b></div>
       <div><span>Cierra</span><b>${dShort(ci.cur.close)}</b></div>
-      <div><span>Lo pagas el</span><b>${dShort(ci.cur.pay)}${ci.cur.approx ? ' (aprox.)' : ''}</b></div>
+      <div><span>Lo pagas</span><b>${S.card.payMode === 'banco' ? dShort(ci.cur.pay) : 'con tu sueldo ~' + dShort(plannedPay(ci.cur))}</b></div>
+      <div><span>Vence (banco)</span><b>${dShort(ci.cur.pay)}${ci.cur.approx ? ' (aprox.)' : ''}</b></div>
     </div>
-    ${ci.due.length ? `<span class="f-lbl">Estados de cuenta por pagar</span>${ci.due.map(s => `<div class="row"><i class="dot" style="background:${s.pay < todayISO() ? 'var(--red)' : 'var(--gold)'}"></i><div class="t"><b>Pagar el ${dShort(s.pay)}</b><span>consumos del ${dShort(s.start)} al ${dShort(s.close)}${s.pay < todayISO() ? ' · VENCIDO' : ''}</span></div><div class="amt">${fmt(s.left)}</div></div>`).join('')}` : ''}
+    ${ci.due.length ? `<span class="f-lbl">Estados de cuenta por pagar</span>${ci.due.map(s => `<div class="row"><i class="dot" style="background:${s.pay < todayISO() ? 'var(--red)' : 'var(--gold)'}"></i><div class="t"><b>Pagar ${payTxt(s)}</b><span>consumos del ${dShort(s.start)} al ${dShort(s.close)} · ${s.pay < todayISO() ? 'VENCIDO el ' : 'vence '}${dShort(s.pay)}</span></div><div class="amt">${fmt(s.left)}</div></div>`).join('')}` : ''}
     <div class="stats" style="border-top:1px solid var(--line);padding-top:12px">
       <div><span>Deuda total</span><b>${fmt(ci.total)}</b></div>
       <div><span>Línea disponible</span><b>${fmt(S.card.limit - ci.total, 0)} <span style="display:inline;color:var(--muted)">de ${fmt(S.card.limit, 0)}</span></b></div>
     </div>
     <span class="f-lbl">Próximas fechas</span>
-    ${sch.map(p => `<div class="row"><div class="t"><b>Cierre ${dShort(p.close)}</b><span>consumos desde ${dShort(p.start)}</span></div><div class="amt neutral">pago ${dShort(p.pay)}${p.approx ? '*' : ''}</div></div>`).join('')}
+    ${sch.map(p => `<div class="row"><div class="t"><b>Cierre ${dShort(p.close)}</b><span>consumos desde ${dShort(p.start)}</span></div><div class="amt neutral" style="text-align:right">${S.card.payMode === 'banco' ? '' : 'pagas ~' + dShort(plannedPay(p)) + '<br>'}<span style="font-size:12px">vence ${dShort(p.pay)}${p.approx ? '*' : ''}</span></div></div>`).join('')}
     ${sch.some(p => p.approx) ? '<div class="sub">* aprox.: pásame el cronograma BCP 2027 cuando llegue.</div>' : ''}
-    <div class="info mt">• Tu tarjeta se paga entre el <b>20 y el 23</b>, <b>antes de tu sueldo</b>: separa ese monto apenas cobres.<br>• Paga siempre el <b>total facturado</b>, no el mínimo, o te cobran intereses.<br>• Si la fecha cae fin de semana o feriado, pasa al siguiente día útil.</div>
+    <div class="info mt">${S.card.payMode === 'banco' ? '• Tu tarjeta vence entre el <b>20 y el 23</b>, <b>antes de tu sueldo</b>: separa ese monto apenas cobres.<br>' : '• La pagas <b>apenas cobras</b>, con margen antes del vencimiento del banco (20–23 del mes siguiente).<br>'}• Paga siempre el <b>total facturado</b>, no el mínimo, o te cobran intereses.<br>• Si la fecha cae fin de semana o feriado, pasa al siguiente día útil.</div>
     <div class="cta mt"><button class="btn gold" data-act="cardpay">Registrar pago de tarjeta</button></div>
   </div>`;
 }
@@ -690,9 +703,10 @@ function vAjustes() {
   <div class="card"><h2>Tarjeta de crédito</h2>
     ${sr('c-limit', 'Línea total', S.card.limit.toFixed(2))}
     ${sr('c-cap', 'Mi tope personal', S.card.cap.toFixed(2))}
-    ${(() => { const ci = cardInfo(); return sr('c-open', `Consumo del ${dShort(ci.cur.start)} al ${dShort(ci.cur.close)}<br><span class="sub">lo pagas el ${dShort(ci.cur.pay)}</span>`, ci.open.amount.toFixed(2))
+    ${(() => { const ci = cardInfo(); return sr('c-open', `Consumo del ${dShort(ci.cur.start)} al ${dShort(ci.cur.close)}<br><span class="sub">lo pagas ${payTxt(ci.cur)}</span>`, ci.open.amount.toFixed(2))
       + sr('c-prev', 'Pendiente de estados ya cerrados<br><span class="sub">pon 0 si ya pagaste todo</span>', ci.due.reduce((a, s) => a + s.left, 0).toFixed(2)); })()}
-    <div class="sub mt8">Fechas de cierre y pago según tu cronograma BCP 2026 (cierre 25).</div>
+    <div class="setrow"><label for="c-mode">Pago la tarjeta</label><select class="inp" id="c-mode" style="width:170px;text-align:left"><option value="sueldo" ${S.card.payMode !== 'banco' ? 'selected' : ''}>Con mi sueldo</option><option value="banco" ${S.card.payMode === 'banco' ? 'selected' : ''}>En la fecha del banco</option></select></div>
+    <div class="sub mt8">Fechas de cierre y vencimiento según tu cronograma BCP 2026 (cierre 25).</div>
     <button class="btn block mt" data-act="savecard">Guardar</button></div>
   <div class="card"><h2>Tarjeta alimentos</h2>
     ${sr('a-bal', 'Saldo actual', foodBalance().toFixed(2))}
@@ -712,7 +726,7 @@ function vAjustes() {
     <div class="sub" style="margin-bottom:12px">Tus datos viven solo en este iPhone. Guarda una copia en Archivos o iCloud de vez en cuando.</div>
     <div class="cta"><button class="btn gold" data-act="export">Exportar copia</button><button class="btn" data-act="import">Importar copia</button><button class="btn" data-act="csv">Exportar a Excel (CSV)</button></div>
     <button class="btn danger block mt" data-act="reset">Borrar todo</button></div>
-  <div class="sub" style="text-align:center;margin:18px 0">Finanzas · v3</div>`;
+  <div class="sub" style="text-align:center;margin:18px 0">Finanzas · v4</div>`;
 }
 
 /* ================= Formularios ================= */
@@ -887,6 +901,7 @@ const actions = {
   savecard() {
     const l = num($('#c-limit').value), c = num($('#c-cap').value), o = num($('#c-open').value), pv = num($('#c-prev').value);
     if (l > 0) S.card.limit = l; if (c > 0) S.card.cap = c;
+    S.card.payMode = $('#c-mode').value;
     const ci = cardInfo(), dueNow = Math.round(ci.due.reduce((a, s) => a + s.left, 0) * 100) / 100;
     if (o >= 0 && pv >= 0 && (o !== ci.open.amount || pv !== dueNow)) {
       const sch = cardSchedule(), idx = sch.findIndex(p => p.close === ci.cur.close);
