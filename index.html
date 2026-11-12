@@ -159,6 +159,7 @@ select.inp{-webkit-appearance:none;appearance:none}
 const KEY = 'finanzas.v1';
 const METHODS = ['Efectivo', 'Débito', 'Yape/Plin', 'Tarjeta de crédito', 'Tarjeta alimentos'];
 const FOOD_CATS = ['Supermercado', 'Comidas fuera'];
+const CASH = ['Efectivo', 'Débito', 'Yape/Plin'];
 const MONTHS = ['ene','feb','mar','abr','may','jun','jul','ago','sep','oct','nov','dic'];
 const MONTHS_L = ['enero','febrero','marzo','abril','mayo','junio','julio','agosto','septiembre','octubre','noviembre','diciembre'];
 const DAYS_L = ['domingo','lunes','martes','miércoles','jueves','viernes','sábado'];
@@ -202,7 +203,7 @@ function defaults() {
       { id:'f-netflix', name:'Netflix', amount:60, day:28, category:'Suscripciones', method:'Tarjeta de crédito', active:true },
       { id:'f-credito', name:'Cuota crédito efectivo', amount:372.80, day:30, category:'Deudas', method:'Débito', active:true, loan:true }
     ],
-    card: { limit:4000, cap:1000, base:745, baseAt: now },
+    card: { limit:4000, cap:1000, base:745, baseAt: now, payDay:30 },
     food: { base:0, baseAt: now },
     loan: { name:'Crédito efectivo', original:3100, capital:3020.86, tea:80.90, cuota:372.80, cuotas:12, next:'2026-11-30', baseAt: now }
   };
@@ -216,6 +217,7 @@ function load() {
   try { S = JSON.parse(localStorage.getItem(KEY)); } catch (e) { S = null; }
   if (!S || !Array.isArray(S.movements)) S = defaults();
   S.skips = S.skips || [];
+  if (!S.card.payDay) S.card.payDay = 30;
 }
 function save() {
   try { localStorage.setItem(KEY, JSON.stringify(S)); }
@@ -275,6 +277,71 @@ function foodBalance() {
     if (m.type === 'gasto' && m.method === 'Tarjeta alimentos') b -= m.amount;
   }
   return Math.round(b * 100) / 100;
+}
+// Dinero que tienes de verdad: efectivo + cuenta + Yape/Plin (las compras con tarjeta no lo bajan hasta que pagas la tarjeta)
+function cashBalance() {
+  let b = 0;
+  for (const m of S.movements) {
+    if (m.type === 'ingreso' && m.category !== 'Tarjeta alimentos') b += m.amount;
+    else if (m.type === 'gasto' && CASH.includes(m.method)) b -= m.amount;
+    else if (m.type === 'pago_tarjeta') b -= m.amount;
+    else if (m.type === 'ajuste') b += m.amount;
+  }
+  return Math.round(b * 100) / 100;
+}
+const daysBetween = (a, b) => Math.round((parse(b) - parse(a)) / 864e5);
+// Lo que entra y sale de tu saldo desde hoy hasta fin de mes
+function upcoming() {
+  const now = new Date(), today = todayISO(), day = S.settings.cycleDay;
+  const monthEnd = iso(new Date(now.getFullYear(), now.getMonth() + 1, 0));
+  const items = [];
+  const cur = cycle(0);
+  // sueldo e ingresos esperados (no la tarjeta de alimentos, que no es saldo)
+  const payISO = iso(clampDate(now.getFullYear(), now.getMonth(), day));
+  const payCk = iso(cycleStartOf(parse(payISO), day));
+  let salaryPending = false;
+  if ((payISO > today || payCk === cur.key) && payCk >= S.startFrom) {
+    for (const i of S.incomes) {
+      if (!(i.amount > 0) || i.category === 'Tarjeta alimentos') continue;
+      if (S.movements.some(m => m.incomeId === i.id && m.cycleKey === payCk)) continue;
+      items.push({ label: i.name, date: payISO, amount: i.amount, note: payISO > today ? 'aprox. ' + dShort(payISO) : 'por llegar', color: 'var(--green)' });
+      salaryPending = true;
+    }
+  }
+  // gastos fijos que salen de tu cuenta
+  for (const c of [cur, cycle(1)]) {
+    if (c.start < S.startFrom) continue;
+    for (const f of S.fixed) {
+      if (!f.active || !(f.amount > 0) || !CASH.includes(f.method)) continue;
+      const due = dueIn(c, f.day);
+      if (due < today || due > monthEnd) continue;
+      const tag = f.id + '|' + c.key;
+      if (S.skips.includes(tag) || S.movements.some(m => m.fixedId === f.id && m.cycleKey === c.key)) continue;
+      items.push({ label: f.name, date: due, amount: -f.amount, note: dShort(due), color: colorOf(f.category) });
+    }
+  }
+  // pago de la tarjeta de crédito
+  const cardDue = iso(clampDate(now.getFullYear(), now.getMonth(), S.card.payDay));
+  const monthStart = iso(new Date(now.getFullYear(), now.getMonth(), 1));
+  const cb = cardBalance();
+  const paidCard = S.movements.some(m => m.type === 'pago_tarjeta' && m.date >= monthStart && m.date <= monthEnd);
+  if (cardDue >= today && cardDue <= monthEnd && cb > 0 && !paidCard)
+    items.push({ label: 'Pago tarjeta de crédito', date: cardDue, amount: -cb, note: dShort(cardDue) + ' · deuda actual', color: 'var(--gold)' });
+  items.sort((a, b) => a.date.localeCompare(b.date) || b.amount - a.amount);
+  const cash = cashBalance();
+  const end = Math.round((cash + items.reduce((s, x) => s + x.amount, 0)) * 100) / 100;
+  // cuánto puedes gastar al día
+  let horizon, spendable;
+  if (salaryPending && payISO > today) {
+    horizon = payISO;
+    spendable = cash + items.filter(x => x.amount < 0 && x.date < payISO).reduce((s, x) => s + x.amount, 0);
+  } else {
+    horizon = iso(addDays(parse(monthEnd), 1));
+    // si el sueldo aún no llega, no cuentes con él para el gasto diario
+    spendable = salaryPending ? cash + items.filter(x => x.amount < 0).reduce((s, x) => s + x.amount, 0) : end;
+  }
+  const days = Math.max(1, daysBetween(today, horizon));
+  return { items, monthEnd, cash, end, horizon, spendable, days, daily: Math.max(0, spendable) / days, salaryPending };
 }
 // Préstamo: TEA → TEM; los "cargos" son la parte fija de la cuota que no es capital ni interés (seguro, etc.)
 function loanBase() {
@@ -376,6 +443,8 @@ function bars() {
   return `<div class="bars">${arr.map(a => `<div class="b ${a.cur ? 'cur' : ''}"><em>${a.v ? Math.round(a.v).toLocaleString('en-US') : ''}</em><i style="height:${Math.max(2, a.v / max * 100)}%"></i><small>${a.c.month}</small></div>`).join('')}</div>`;
 }
 function movRow(m) {
+  if (m.type === 'ajuste') return `<div class="row tap" data-act="edit" data-id="${m.id}"><i class="dot" style="background:#5f584f"></i><div class="t"><b>Ajuste de saldo</b><span>${dShort(m.date)}</span></div>
+    <div class="amt neutral">${m.amount >= 0 ? '+' : '−'}${fmt(Math.abs(m.amount))}</div></div>`;
   const isIn = m.type === 'ingreso', isPay = m.type === 'pago_tarjeta';
   const title = isPay ? 'Pago de tarjeta' : m.category;
   const sub = [dShort(m.date), m.note, isIn ? null : m.method, m.auto ? 'fijo' : null].filter(Boolean).map(esc).join(' · ');
@@ -396,7 +465,26 @@ function vInicio() {
     const miss = S.incomes.filter(i => i.amount > 0 && !S.movements.some(m => m.incomeId === i.id && m.cycleKey === c.key));
     if (miss.length) pend = `<div class="card"><h2>¿Ya cobraste?</h2><div class="cta">${miss.map(i => `<button class="btn outline sm" data-act="income" data-id="${i.id}">+ ${esc(i.name)} ${fmt(i.amount, 0)}</button>`).join('')}</div></div>`;
   }
-  const firstUse = !S.movements.length ? `<div class="card info">Empieza registrando cuánto dinero tienes hoy como ingreso <b>"Saldo inicial"</b>. Desde el <b>${dShort(S.startFrom)}</b> tus gastos fijos se apuntan solos y aquí te aparecerá el botón para registrar tu sueldo.</div>` : '';
+  const firstUse = !S.movements.length ? `<div class="card info">Empieza tocando <b>Saldo disponible</b> para poner cuánto dinero tienes hoy (efectivo + cuenta + Yape). Desde el <b>${dShort(S.startFrom)}</b> tus gastos fijos se apuntan solos y aquí te aparecerá el botón para registrar tu sueldo.</div>` : '';
+
+  // saldo y proyección a fin de mes (solo en el mes actual)
+  let now2 = '';
+  if (cur) {
+    const u = upcoming();
+    const dailyTxt = u.spendable < 0
+      ? `<span style="color:var(--red)">Te faltan ${fmt(-u.spendable, 0)} para cubrir lo pendiente${u.salaryPending ? ' antes del sueldo' : ''}</span>`
+      : `Puedes gastar ~<b style="color:var(--text)">${fmt(u.daily, 0)} al día</b> ${u.salaryPending ? 'hasta tu sueldo (' + dShort(u.horizon) + ')' : 'hasta fin de mes'}`;
+    const line = (dot, label, note, amt, cls = '') => `<div class="row"><i class="dot" style="background:${dot}"></i><div class="t"><b>${esc(label)}</b>${note ? `<span>${esc(note)}</span>` : ''}</div><div class="amt ${cls}">${amt}</div></div>`;
+    now2 = `<div class="card kpi hero tap" data-act="setcash"><div class="lbl">Saldo disponible</div><div class="v ${u.cash >= 0 ? 'pos' : ''}">${fmtH(u.cash)}</div>
+        <div class="note">efectivo + cuenta + Yape/Plin · <span style="color:var(--gold)">toca para ajustar</span></div><div class="note" style="margin-top:8px">${dailyTxt}</div></div>
+      <div class="card"><h2>Hasta fin de mes · ${dShort(u.monthEnd)}</h2>
+        ${line('#8e867a', 'Saldo hoy', '', fmt(u.cash))}
+        ${u.items.map(x => line(x.color, x.label, x.note, (x.amount > 0 ? '+' : '−') + fmt(Math.abs(x.amount)), x.amount > 0 ? 'in' : '')).join('')}
+        ${u.items.length ? '' : `<div class="sub" style="padding:6px 0 10px">No tienes pagos pendientes antes del ${dShort(u.monthEnd)}.</div>`}
+        <div class="row" style="border-top:1px solid var(--line2)"><div class="t"><b style="font-size:16px">Te quedaría</b><span>al ${dShort(u.monthEnd)}, sin contar gastos nuevos</span></div><div class="amt" style="font-size:19px;color:${u.end < 0 ? 'var(--red)' : 'var(--gold2)'}">${fmt(u.end)}</div></div>
+        <div class="sub mt8">Tus compras con tarjeta de crédito no bajan tu saldo hoy: salen el día que pagas la tarjeta.</div>
+      </div>`;
+  }
 
   // fijos
   let fx = '';
@@ -417,13 +505,12 @@ function vInicio() {
   }
 
   return `<header class="top"><div><div class="sub">${cur ? `${DAYS_L[now.getDay()]}, ${now.getDate()} de ${MONTHS_L[now.getMonth()]}` : 'Mes de ' + c.monthL + ' ' + c.year}</div><h1>Finanzas</h1></div>${cycleNav()}</header>
-  ${firstUse}${pend}
+  ${firstUse}${pend}${now2}
   <div class="grid2">
     <div class="card kpi"><div class="lbl">Ingresos del mes</div><div class="v">${fmtH(t.inc)}</div>${t.food ? `<div class="note">incl. ${fmt(t.food, 0)} alimentos</div>` : ''}</div>
-    <div class="card kpi"><div class="lbl">Gastos del mes</div><div class="v">${fmtH(t.exp)}</div></div>
+    <div class="card kpi"><div class="lbl">Gastos del mes</div><div class="v">${fmtH(t.exp)}</div><div class="note">balance <span style="color:${t.left < 0 ? 'var(--red)' : 'var(--text)'}">${fmt(t.left, 0)}</span></div></div>
   </div>
-  <div class="card kpi hero"><div class="lbl">Te queda</div><div class="v ${t.left >= 0 ? 'pos' : ''}">${fmtH(t.left)}</div>
-    ${cur ? `<div class="note">${daysLeft(c)} hasta tu próximo mes</div>` : ''}</div>
+  ${cur ? `<div class="sub" style="margin:-4px 4px 12px">Tu mes va del ${c.label.replace(' – ', ' al ')} · ${daysLeft(c).toLowerCase()}</div>` : ''}
   <div class="grid2">
     <div class="card tap" data-act="goto" data-v="deudas"><div class="lbl">Tarjeta de crédito</div><div class="kpi"><div class="v" style="font-size:20px">${fmtH(cb)}</div></div>
       <div class="bar ${capPct > 100 ? 'over' : capPct >= 80 ? 'warn' : ''}"><i style="width:${Math.min(100, capPct)}%"></i></div>
@@ -538,6 +625,7 @@ function vAjustes() {
     ${sr('c-limit', 'Línea total', S.card.limit.toFixed(2))}
     ${sr('c-cap', 'Mi tope personal', S.card.cap.toFixed(2))}
     ${sr('c-bal', 'Deuda actual (según el banco)', cardBalance().toFixed(2))}
+    <div class="setrow"><label for="c-payday">Día de pago de la tarjeta</label><input class="inp" id="c-payday" type="number" min="1" max="31" value="${S.card.payDay}" style="width:80px"></div>
     <button class="btn block mt" data-act="savecard">Guardar</button></div>
   <div class="card"><h2>Tarjeta alimentos</h2>
     ${sr('a-bal', 'Saldo actual', foodBalance().toFixed(2))}
@@ -557,7 +645,7 @@ function vAjustes() {
     <div class="sub" style="margin-bottom:12px">Tus datos viven solo en este iPhone. Guarda una copia en Archivos o iCloud de vez en cuando.</div>
     <div class="cta"><button class="btn gold" data-act="export">Exportar copia</button><button class="btn" data-act="import">Importar copia</button><button class="btn" data-act="csv">Exportar a Excel (CSV)</button></div>
     <button class="btn danger block mt" data-act="reset">Borrar todo</button></div>
-  <div class="sub" style="text-align:center;margin:18px 0">Finanzas · v1</div>`;
+  <div class="sub" style="text-align:center;margin:18px 0">Finanzas · v2</div>`;
 }
 
 /* ================= Formularios ================= */
@@ -637,7 +725,7 @@ function download(name, text, type) {
 function exportCSV() {
   const rows = [['Fecha', 'Tipo', 'Categoría', 'Método', 'Monto', 'Nota']];
   [...S.movements].sort((a, b) => a.date.localeCompare(b.date)).forEach(m =>
-    rows.push([m.date, m.type === 'pago_tarjeta' ? 'pago tarjeta' : m.type, m.type === 'pago_tarjeta' ? '' : m.category, m.method || '', (m.type === 'ingreso' ? m.amount : -m.amount).toFixed(2), m.note || '']));
+    rows.push([m.date, m.type === 'pago_tarjeta' ? 'pago tarjeta' : m.type, m.category || '', m.method || '', (m.type === 'ingreso' || m.type === 'ajuste' ? m.amount : -m.amount).toFixed(2), m.note || '']));
   const csv = '﻿' + rows.map(r => r.map(v => `"${String(v).replace(/"/g, '""')}"`).join(';')).join('\n');
   download(`finanzas-${todayISO()}.csv`, csv, 'text/csv');
 }
@@ -650,6 +738,10 @@ const actions = {
   close: closeSheet,
   edit(el) {
     const m = S.movements.find(x => x.id === el.dataset.id); if (!m) return;
+    if (m.type === 'ajuste') {
+      if (confirm('¿Eliminar este ajuste de saldo?')) { S.movements = S.movements.filter(x => x.id !== m.id); save(); render(); toast('Eliminado'); }
+      return;
+    }
     if (m.type === 'pago_tarjeta') cardPayForm({ ...m }); else movForm({ ...m });
   },
   income(el) {
@@ -665,6 +757,22 @@ const actions = {
     movForm({ type: 'gasto', category: 'Deudas', method: 'Débito', loan: v, amount: v === 'cuota' ? S.loan.cuota : '', note: v === 'cuota' ? 'Cuota ' + S.loan.name : 'Pago anticipado ' + S.loan.name });
   },
   cardpay() { cardPayForm(); },
+  setcash() {
+    sheetCtx = { kind: 'cash' };
+    openSheet(`<h3>¿Cuánto tienes ahora?<button data-act="close">Cerrar</button></h3>
+      <div class="sub">Suma tu efectivo, lo que hay en tu cuenta y en Yape/Plin. No incluyas la tarjeta de alimentos ni la de crédito.</div>
+      <input class="amount mt" id="f-cash" inputmode="decimal" placeholder="S/ 0.00" value="${cashBalance() > 0 ? cashBalance() : ''}" autocomplete="off">
+      <div class="sub">La diferencia se guarda como "ajuste de saldo": no cuenta como gasto ni como ingreso.</div>
+      <button class="btn gold block mt" data-act="cashsave">Guardar saldo</button>`);
+    setTimeout(() => { const i = $('#f-cash'); i?.focus(); i?.select(); }, 260);
+  },
+  cashsave() {
+    const v = num($('#f-cash').value);
+    if (!(v >= 0)) { toast('Escribe un monto'); return; }
+    const diff = Math.round((v - cashBalance()) * 100) / 100;
+    if (diff !== 0) S.movements.push({ id: uid(), type: 'ajuste', amount: diff, date: todayISO(), created: Date.now() });
+    save(); closeSheet(); render(); toast('Saldo actualizado');
+  },
   ftype(el) { readMovForm(); sheetCtx.m.type = el.dataset.v; drawMovForm(); },
   fcat(el) { readMovForm(); sheetCtx.m.category = el.dataset.v; drawMovForm(); },
   fmethod(el) {
@@ -712,6 +820,7 @@ const actions = {
   savecard() {
     const l = num($('#c-limit').value), c = num($('#c-cap').value), b = num($('#c-bal').value);
     if (l > 0) S.card.limit = l; if (c > 0) S.card.cap = c;
+    const pd = parseInt($('#c-payday').value); if (pd >= 1 && pd <= 31) S.card.payDay = pd;
     if (b >= 0 && b !== cardBalance()) { S.card.base = b; S.card.baseAt = Date.now(); }
     save(); render(); toast('Tarjeta actualizada');
   },
@@ -754,7 +863,7 @@ document.addEventListener('click', e => {
   if (a && actions[a.dataset.act]) { e.preventDefault(); actions[a.dataset.act](a); }
 });
 document.addEventListener('input', e => { if (e.target.id === 'simRange') updateSim(); });
-document.addEventListener('keydown', e => { if (e.key === 'Enter' && sheetCtx && e.target.tagName === 'INPUT') { e.preventDefault(); (sheetCtx.kind === 'fixed' ? actions.xsave : actions.fsave)(); } });
+document.addEventListener('keydown', e => { if (e.key === 'Enter' && sheetCtx && e.target.tagName === 'INPUT') { e.preventDefault(); ({ fixed: actions.xsave, cash: actions.cashsave }[sheetCtx.kind] || actions.fsave)(); } });
 $('#scrim').addEventListener('click', closeSheet);
 $('#fab').addEventListener('click', () => movForm({ date: off === 0 ? todayISO() : cycle(off).end }));
 $('#importFile').addEventListener('change', async e => {
