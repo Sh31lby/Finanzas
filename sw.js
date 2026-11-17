@@ -1,5 +1,5 @@
 // Guarda la app para que abra sin conexión. Sube VERSION cuando cambies archivos.
-const VERSION = 'finanzas-v6';
+const VERSION = 'finanzas-v7';
 const FILES = ['./', './index.html', './manifest.webmanifest',
   './icons/apple-touch-icon.png', './icons/icon-192.png', './icons/icon-512.png', './icons/favicon.png'];
 

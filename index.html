@@ -475,6 +475,29 @@ function upcoming() {
   const days = Math.max(1, daysBetween(today, horizon));
   return { items, monthEnd, cash, end, horizon, spendable, days, daily: Math.max(0, spendable) / days, salaryPending };
 }
+/* ---------- Gasto diario con acumulado: monto fijo por día; lo que no gastas pasa a mañana ---------- */
+const isDaily = m => m.type === 'gasto' && CASH.includes(m.method) && !m.fixedId && !m.loan;
+function dailyBudget() {
+  const u = upcoming(), today = todayISO();
+  const sig = S.movements.filter(m => m.type === 'ajuste' || (m.type === 'ingreso' && m.category !== 'Tarjeta alimentos'))
+    .reduce((a, m) => a + m.amount, 0).toFixed(2) + '|' + u.horizon;
+  let P = S.dailyPlan;
+  if (!P || today < P.start || today >= P.end || P.sig !== sig) {
+    // nuevo plan desde hoy: lo gastado hoy cuenta contra el monto de hoy
+    const spentToday = S.movements.filter(m => isDaily(m) && m.date === today).reduce((a, m) => a + m.amount, 0);
+    const days = Math.max(1, daysBetween(today, u.horizon));
+    P = S.dailyPlan = { start: today, end: u.horizon, base: Math.max(0, Math.floor((u.spendable + spentToday) / days * 100) / 100), sig, at: Date.now() };
+    save();
+  }
+  const inPlan = m => isDaily(m) && m.date <= today && (m.date >= P.start || (m.created || 0) > P.at);
+  const before = S.movements.filter(m => inPlan(m) && m.date < today).reduce((a, m) => a + m.amount, 0);
+  const spentToday = S.movements.filter(m => inPlan(m) && m.date === today).reduce((a, m) => a + m.amount, 0);
+  const idx = daysBetween(P.start, today);
+  const allowance = Math.round((P.base * (idx + 1) - before) * 100) / 100;   // lo que tenías para hoy
+  const left = Math.round((allowance - spentToday) * 100) / 100;            // lo que te queda hoy
+  const daysLeft = daysBetween(today, P.end);
+  return { u, base: P.base, allowance, carry: Math.round((allowance - P.base) * 100) / 100, spentToday, left, tomorrow: Math.round((left + P.base) * 100) / 100, daysLeft, end: P.end };
+}
 // Préstamo: TEA → TEM; los "cargos" son la parte fija de la cuota que no es capital ni interés (seguro, etc.)
 function loanBase() {
   const L = S.loan, tem = Math.pow(1 + L.tea / 100, 1 / 12) - 1;
@@ -610,13 +633,21 @@ function vInicio() {
   // saldo y proyección a fin de mes (solo en el mes actual)
   let now2 = '';
   if (cur) {
-    const u = upcoming();
+    const D = dailyBudget(), u = D.u;
+    const hasta = u.salaryPending ? 'tu sueldo (' + dShort(u.horizon) + ')' : 'fin de mes';
     const dailyTxt = u.spendable < 0
       ? `<span style="color:var(--red)">Te faltan ${fmt(-u.spendable, 0)} para cubrir lo pendiente${u.salaryPending ? ' antes del sueldo' : ''}</span>`
-      : `Puedes gastar ~<b style="color:var(--text)">${fmt(u.daily, 0)} al día</b> ${u.salaryPending ? 'hasta tu sueldo (' + dShort(u.horizon) + ')' : 'hasta fin de mes'}`;
+      : `Base: <b style="color:var(--text)">${fmt(D.base)} al día</b> hasta ${hasta}`;
+    const pct = D.allowance > 0 ? Math.min(100, D.spentToday / D.allowance * 100) : 100;
+    const todayCard = u.spendable < 0 ? '' : `<div class="card"><h2>Hoy puedes gastar <span class="pill">${D.daysLeft} día${D.daysLeft > 1 ? 's' : ''} hasta ${u.salaryPending ? 'el ' + dShort(u.horizon) : 'fin de mes'}</span></h2>
+      <div class="big" style="color:${D.left < 0 ? 'var(--red)' : 'var(--gold2)'}">${D.left < 0 ? 'Te pasaste ' + fmt(-D.left) : fmtH(D.left)}</div>
+      <div class="sub">${fmt(D.base)} diarios ${D.carry > 0.004 ? `<span style="color:var(--green)">+ ${fmt(D.carry)} que te sobró</span>` : D.carry < -0.004 ? `<span style="color:var(--red)">− ${fmt(-D.carry)} que te pasaste</span>` : ''}${D.spentToday ? ` · gastaste hoy ${fmt(D.spentToday)}` : ''}</div>
+      <div class="bar ${D.left < 0 ? 'over' : pct >= 80 ? 'warn' : ''}"><i style="width:${pct}%"></i></div>
+      <div class="note sub mt8">${D.daysLeft > 1 ? `Si no gastas más hoy, mañana tendrás <b style="color:var(--text)">${fmt(D.tomorrow)}</b>.` : 'Hoy es el último día antes de ' + hasta + '.'}</div>
+      <div class="sub mt8" style="font-size:12px">Cuenta lo que pagas en efectivo, débito o Yape/Plin (no la tarjeta de crédito, que tiene su tope, ni los gastos fijos).</div></div>`;
     const line = (dot, label, note, amt, cls = '') => `<div class="row"><i class="dot" style="background:${dot}"></i><div class="t"><b>${esc(label)}</b>${note ? `<span>${esc(note)}</span>` : ''}</div><div class="amt ${cls}">${amt}</div></div>`;
     now2 = `<div class="card kpi hero tap" data-act="setcash"><div class="lbl">Saldo disponible</div><div class="v ${u.cash >= 0 ? 'pos' : ''}">${fmtH(u.cash)}</div>
-        <div class="note">efectivo + cuenta + Yape/Plin · <span style="color:var(--gold)">toca para ajustar</span></div><div class="note" style="margin-top:8px">${dailyTxt}</div></div>
+        <div class="note">efectivo + cuenta + Yape/Plin · <span style="color:var(--gold)">toca para ajustar</span></div><div class="note" style="margin-top:8px">${dailyTxt}</div></div>${todayCard}
       <div class="card"><h2>Hasta fin de mes · ${dShort(u.monthEnd)}</h2>
         ${line('var(--muted)', 'Saldo hoy', '', fmt(u.cash))}
         ${u.items.map(x => line(x.color, x.label, x.note, (x.amount > 0 ? '+' : '−') + fmt(Math.abs(x.amount)), x.amount > 0 ? 'in' : '')).join('')}
@@ -808,7 +839,7 @@ function vAjustes() {
     <div class="sub" style="margin-bottom:12px">Tus datos viven solo en este iPhone. Guarda una copia en Archivos o iCloud de vez en cuando.</div>
     <div class="cta"><button class="btn gold" data-act="export">Exportar copia</button><button class="btn" data-act="import">Importar copia</button><button class="btn" data-act="csv">Exportar a Excel (CSV)</button></div>
     <button class="btn danger block mt" data-act="reset">Borrar todo</button></div>
-  <div class="sub" style="text-align:center;margin:18px 0">Finanzas · v6</div>`;
+  <div class="sub" style="text-align:center;margin:18px 0">Finanzas · v7</div>`;
 }
 
 /* ================= Formularios ================= */
