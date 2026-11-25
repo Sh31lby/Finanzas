@@ -1070,7 +1070,7 @@ function vAjustes() {
     <div class="sub" style="margin-bottom:12px">Tus datos viven solo en este iPhone. Guarda una copia en Archivos o iCloud de vez en cuando.</div>
     <div class="cta"><button class="btn gold" data-act="export">Exportar copia</button><button class="btn" data-act="import">Importar copia</button><button class="btn" data-act="csv">Exportar a Excel (CSV)</button></div>
     <button class="btn danger block mt" data-act="reset">Borrar todo</button></div>
-  <div class="sub" style="text-align:center;margin:18px 0">Finanzas · v8</div>`;
+  <div class="sub" style="text-align:center;margin:18px 0">Finanzas · v9</div>`;
 }
 
 /* ================= Formularios ================= */
@@ -1401,7 +1401,17 @@ render();
 setInterval(applyTheme, 30000);
 if (n0) toast(n0 === 1 ? '1 gasto fijo registrado' : n0 + ' gastos fijos registrados');
 if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
-if ('serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('sw.js').catch(() => {});
+if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === 'localhost')) {
+  // busca versión nueva al abrir y cada vez que vuelves a la app; si llega una, recarga sola una vez
+  navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' }).then(reg => {
+    document.addEventListener('visibilitychange', () => { if (!document.hidden) reg.update().catch(() => {}); });
+  }).catch(() => {});
+  let hadController = !!navigator.serviceWorker.controller, reloaded = false;
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    if (hadController && !reloaded && !sheetCtx) { reloaded = true; location.reload(); }
+    hadController = true;
+  });
+}
 </script>
 </body>
 </html>
