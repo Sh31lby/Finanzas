@@ -432,7 +432,7 @@ function cashBalance() {
   let b = 0;
   for (const m of S.movements) {
     if (m.type === 'ingreso' && m.category !== 'Tarjeta alimentos') b += m.amount;
-    else if (m.type === 'gasto' && CASH.includes(m.method)) b -= m.amount;
+    else if (m.type === 'gasto' && CASH.includes(m.method) && !m.goalId) b -= m.amount;
     else if (m.type === 'pago_tarjeta') b -= m.amount;
     else if (m.type === 'ahorro') b -= m.amount;
     else if (m.type === 'ajuste') b += m.amount;
@@ -511,7 +511,7 @@ function upcoming() {
   return { items, monthEnd, cash, reserved: Math.round((cash - cashToday) * 100) / 100, end, horizon, hastaTxt, spendable, days, daily: Math.max(0, spendable) / days, salaryPending, futureInc };
 }
 /* ---------- Gasto diario con acumulado: monto fijo por día; lo que no gastas pasa a mañana ---------- */
-const isDaily = m => m.type === 'gasto' && CASH.includes(m.method) && !m.fixedId && !m.loan;
+const isDaily = m => m.type === 'gasto' && CASH.includes(m.method) && !m.fixedId && !m.loan && !m.goalId;
 function dailyBudget() {
   const u = upcoming(), today = todayISO();
   const sig = S.movements.filter(m => m.type === 'ajuste' || m.type === 'ahorro' || (m.type === 'ingreso' && m.category !== 'Tarjeta alimentos'))
@@ -647,7 +647,8 @@ function movRow(m) {
   const isIn = m.type === 'ingreso', isPay = m.type === 'pago_tarjeta';
   const title = isPay ? 'Pago de tarjeta' : m.category;
   const tc = m.type === 'gasto' && m.method === 'Tarjeta de crédito';
-  const sub = [dShort(m.date), m.note, isIn ? null : m.method, m.auto ? 'fijo' : null].filter(Boolean).map(esc).join(' · ')
+  const gName = m.goalId && m.type === 'gasto' ? ((S.goals || []).find(g => g.id === m.goalId) || {}).name : null;
+  const sub = [dShort(m.date), m.note, isIn ? null : m.method, gName ? 'de ' + gName : null, m.auto ? 'fijo' : null].filter(Boolean).map(esc).join(' · ')
     + (tc ? ` · <span style="color:var(--gold)">se paga ${S.card.payMode === 'banco' ? dShort(periodOf(m.date).pay) : '~' + dShort(plannedPay(periodOf(m.date)))}</span>` : '');
   const col = isPay ? '#9b9893' : isIn ? 'var(--green)' : colorOf(m.category);
   return `<div class="row tap" data-act="edit" data-id="${m.id}"><i class="dot" style="background:${col}"></i><div class="t"><b>${esc(title)}</b><span>${sub}</span></div>
@@ -849,7 +850,7 @@ function cashAt(dateISO) {
   for (const m of S.movements) {
     if (m.date > dateISO) continue;
     if (m.type === 'ingreso' && m.category !== 'Tarjeta alimentos') b += m.amount;
-    else if (m.type === 'gasto' && CASH.includes(m.method)) b -= m.amount;
+    else if (m.type === 'gasto' && CASH.includes(m.method) && !m.goalId) b -= m.amount;
     else if (m.type === 'pago_tarjeta' || m.type === 'ahorro') b -= m.amount;
     else if (m.type === 'ajuste') b += m.amount;
   }
@@ -863,7 +864,7 @@ function avgMonthly() {
   return v > 0 ? v : S.fixed.filter(f => f.active && f.amount > 0).reduce((a, f) => a + f.amount, 0) + 45 * 30;
 }
 function goalSaved(g) {
-  return Math.round((g.base + S.movements.filter(m => m.type === 'ahorro' && m.goalId === g.id).reduce((a, m) => a + m.amount, 0)) * 100) / 100;
+  return Math.round((g.base + S.movements.filter(m => m.goalId === g.id && (m.type === 'ahorro' || m.type === 'gasto')).reduce((a, m) => a + (m.type === 'gasto' ? -m.amount : m.amount), 0)) * 100) / 100;
 }
 function ring(pct, size = 56, stroke = 7, color = 'var(--ink)', label = '') {
   const r = (size - stroke) / 2, C = 2 * Math.PI * r, p = Math.max(0, Math.min(1, pct));
@@ -1095,7 +1096,7 @@ function vAjustes() {
     <div class="sub" style="margin-bottom:12px">Tus datos viven solo en este iPhone. Guarda una copia en Archivos o iCloud de vez en cuando.</div>
     <div class="cta"><button class="btn gold" data-act="export">Exportar copia</button><button class="btn" data-act="import">Importar copia</button><button class="btn" data-act="csv">Exportar a Excel (CSV)</button></div>
     <button class="btn danger block mt" data-act="reset">Borrar todo</button></div>
-  <div class="sub" style="text-align:center;margin:18px 0">Finanzas · v12</div>`;
+  <div class="sub" style="text-align:center;margin:18px 0">Finanzas · v13</div>`;
 }
 
 /* ================= Formularios ================= */
@@ -1117,6 +1118,15 @@ function drawMovForm() {
     ${isG ? `<span class="f-lbl">Pagado con</span><div class="chips">${METHODS.map(x => `<button class="chip ${x === m.method ? 'on' : ''}" data-act="fmethod" data-v="${x}">${x}</button>`).join('')}</div>` : ''}
     ${isG && m.method === 'Tarjeta de crédito' ? `<div class="cardhint" id="cardHint">${cardHint(m.date)}</div>` : ''}
     ${warn ? `<div class="warnmsg">La tarjeta de alimentos solo sirve en supermercados y comida.</div>` : ''}
+    ${(() => {
+      if (!isG || special || !CASH.includes(m.method)) { m.goalId = undefined; return ''; }
+      const gs = (S.goals || []).filter(g => goalSaved(g) > 0 || g.id === m.goalId);
+      if (!gs.length) return '';
+      const g = gs.find(x => x.id === m.goalId);
+      const left = g ? goalSaved(g) + (edit && sheetCtx.orig === g.id ? sheetCtx.origAmt : 0) : 0;
+      return `<span class="f-lbl">¿Sale de un ahorro?</span><div class="chips"><button class="chip ${!m.goalId ? 'on' : ''}" data-act="fgoal" data-v="">No, del día a día</button>${gs.map(x => `<button class="chip ${x.id === m.goalId ? 'on' : ''}" data-act="fgoal" data-v="${x.id}">${esc(x.name)} · ${fmt(goalSaved(x), 0)}</button>`).join('')}</div>
+        ${g ? `<div class="cardhint">Se descuenta de <b>${esc(g.name)}</b> (tienes ${fmt(left)}). No baja tu gasto diario.</div>` : ''}`;
+    })()}
     <span class="f-lbl">Fecha</span><input class="inp" type="date" id="f-date" value="${m.date}">
     <span class="f-lbl">Nota (opcional)</span><input class="inp" id="f-note" placeholder="ej. Plaza Vea, almuerzo, taxi…" value="${esc(m.note)}">
     <button class="btn gold block mt" data-act="fsave">${edit ? 'Guardar cambios' : 'Añadir'}</button>
@@ -1214,7 +1224,7 @@ const actions = {
       if (confirm(m.type === 'ahorro' ? '¿Eliminar este movimiento de ahorro?' : '¿Eliminar este ajuste de saldo?')) { S.movements = S.movements.filter(x => x.id !== m.id); save(); render(); toast('Eliminado'); }
       return;
     }
-    if (m.type === 'pago_tarjeta') cardPayForm({ ...m }); else movForm({ ...m });
+    if (m.type === 'pago_tarjeta') cardPayForm({ ...m }); else { movForm({ ...m }); sheetCtx.orig = m.goalId; sheetCtx.origAmt = m.amount; drawMovForm(); }
   },
   income(el) {
     const i = S.incomes.find(x => x.id === el.dataset.id), early = el.dataset.next === '1', c = cycle(early ? 1 : 0);
@@ -1266,6 +1276,7 @@ const actions = {
   goaldelete() {
     if (!confirm('¿Eliminar esta meta? Los aportes registrados se borran también.')) return;
     const id = sheetCtx.g.id; S.goals = S.goals.filter(g => g.id !== id); S.movements = S.movements.filter(m => !(m.type === 'ahorro' && m.goalId === id));
+    S.movements.forEach(m => { if (m.goalId === id) delete m.goalId; });
     save(); closeSheet(); render();
   },
   goaladd(el) {
@@ -1303,6 +1314,7 @@ const actions = {
   },
   ftype(el) { readMovForm(); sheetCtx.m.type = el.dataset.v; drawMovForm(); },
   fcat(el) { readMovForm(); sheetCtx.m.category = el.dataset.v; drawMovForm(); },
+  fgoal(el) { readMovForm(); sheetCtx.m.goalId = el.dataset.v || undefined; drawMovForm(); },
   fmethod(el) {
     if (sheetCtx.kind === 'card') { sheetCtx.m.method = el.dataset.v; el.parentNode.querySelectorAll('.chip').forEach(c => c.classList.toggle('on', c === el)); return; }
     readMovForm(); sheetCtx.m.method = el.dataset.v;
