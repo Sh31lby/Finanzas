@@ -441,6 +441,11 @@ function cashBalance() {
 }
 const daysBetween = (a, b) => Math.round((parse(b) - parse(a)) / 864e5);
 // Lo que entra y sale de tu saldo desde hoy hasta fin de mes
+// ¿ya está pagado este gasto fijo en ese mes? La cuota del crédito también cuenta si la registraste desde Deudas
+function fixedMov(f, c) {
+  return S.movements.find(m => (m.fixedId === f.id && m.cycleKey === c.key)
+    || (f.loan && m.loan === 'cuota' && m.date >= c.start && m.date <= c.end));
+}
 function cycleFromKey(ck) {
   const d = parse(ck), next = clampDate(d.getFullYear(), d.getMonth() + 1, S.settings.cycleDay);
   return { start: ck, end: iso(addDays(next, -1)), key: ck };
@@ -459,7 +464,7 @@ function outflows(from, to) {
       if (!f.active || !(f.amount > 0) || !CASH.includes(f.method)) continue;
       const due = dueIn(c, f.day);
       if (due < from || due > to) continue;
-      if (S.skips.includes(f.id + '|' + c.key) || S.movements.some(m => m.fixedId === f.id && m.cycleKey === c.key)) continue;
+      if (S.skips.includes(f.id + '|' + c.key) || fixedMov(f, c)) continue;
       out.push({ label: f.name, date: due, amount: -f.amount, note: dShort(due), color: colorOf(f.category) });
     }
   }
@@ -579,7 +584,7 @@ function autoFixed() {
     const due = dueIn(c, f.day);
     if (today < due) continue;
     const tag = f.id + '|' + c.key;
-    if (S.skips.includes(tag) || S.movements.some(m => m.fixedId === f.id && m.cycleKey === c.key)) continue;
+    if (S.skips.includes(tag) || fixedMov(f, c)) continue;
     S.movements.push({ id: uid(), type: 'gasto', amount: f.amount, category: f.category, method: f.method, date: due,
       note: f.name, fixedId: f.id, cycleKey: c.key, auto: true, created: Date.now(), ...(f.loan ? { loan: 'cuota' } : {}) });
     added++;
@@ -709,7 +714,7 @@ function vInicio() {
     const before = c.start < S.startFrom;
     fx = `<div class="card"><h2>Gastos fijos · ${c.monthL} <button data-act="goto" data-v="ajustes">Editar</button></h2>${showFixed.map(f => {
       const due = dueIn(c, f.day);
-      const m = S.movements.find(x => x.fixedId === f.id && x.cycleKey === c.key);
+      const m = fixedMov(f, c);
       let pill;
       if (!(f.amount > 0)) pill = `<span class="pill miss">pon el monto</span>`;
       else if (m) pill = `<span class="pill ok">✓ ${dShort(m.date)}</span>`;
@@ -1088,7 +1093,7 @@ function vAjustes() {
     <div class="sub" style="margin-bottom:12px">Tus datos viven solo en este iPhone. Guarda una copia en Archivos o iCloud de vez en cuando.</div>
     <div class="cta"><button class="btn gold" data-act="export">Exportar copia</button><button class="btn" data-act="import">Importar copia</button><button class="btn" data-act="csv">Exportar a Excel (CSV)</button></div>
     <button class="btn danger block mt" data-act="reset">Borrar todo</button></div>
-  <div class="sub" style="text-align:center;margin:18px 0">Finanzas · v10</div>`;
+  <div class="sub" style="text-align:center;margin:18px 0">Finanzas · v11</div>`;
 }
 
 /* ================= Formularios ================= */
