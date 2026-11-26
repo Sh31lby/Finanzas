@@ -441,59 +441,69 @@ function cashBalance() {
 }
 const daysBetween = (a, b) => Math.round((parse(b) - parse(a)) / 864e5);
 // Lo que entra y sale de tu saldo desde hoy hasta fin de mes
-function upcoming() {
-  const now = new Date(), today = todayISO(), day = S.settings.cycleDay;
-  const monthEnd = iso(new Date(now.getFullYear(), now.getMonth() + 1, 0));
-  const items = [];
-  const cur = cycle(0);
-  // sueldo e ingresos esperados (no la tarjeta de alimentos, que no es saldo)
-  const payISO = iso(clampDate(now.getFullYear(), now.getMonth(), day));
-  const payCk = iso(cycleStartOf(parse(payISO), day));
-  let salaryPending = false;
-  if ((payISO > today || payCk === cur.key) && payCk >= S.startFrom) {
-    for (const i of S.incomes) {
-      if (!(i.amount > 0) || i.category === 'Tarjeta alimentos') continue;
-      if (S.movements.some(m => m.incomeId === i.id && m.cycleKey === payCk)) continue;
-      items.push({ label: i.name, date: payISO, amount: i.amount, note: payISO > today ? 'aprox. ' + dShort(payISO) : 'por llegar', color: 'var(--green)' });
-      salaryPending = true;
-    }
-  }
-  // gastos fijos que salen de tu cuenta
-  for (const c of [cur, cycle(1)]) {
+function cycleFromKey(ck) {
+  const d = parse(ck), next = clampDate(d.getFullYear(), d.getMonth() + 1, S.settings.cycleDay);
+  return { start: ck, end: iso(addDays(next, -1)), key: ck };
+}
+// ¿ya registraste este ingreso para el mes que empieza en ck? (con el botón o a mano con la misma categoría)
+function incomeRegistered(i, ck) {
+  const c = cycleFromKey(ck);
+  return S.movements.some(m => m.type === 'ingreso' && ((m.incomeId === i.id && m.cycleKey === ck) || (m.category === i.category && m.date >= c.start && m.date <= c.end)));
+}
+// gastos fijos (de tu cuenta) y pagos de tarjeta entre dos fechas
+function outflows(from, to) {
+  const out = [];
+  for (const c of [cycle(0), cycle(1), cycle(2)]) {
     if (c.start < S.startFrom) continue;
     for (const f of S.fixed) {
       if (!f.active || !(f.amount > 0) || !CASH.includes(f.method)) continue;
       const due = dueIn(c, f.day);
-      if (due < today || due > monthEnd) continue;
-      const tag = f.id + '|' + c.key;
-      if (S.skips.includes(tag) || S.movements.some(m => m.fixedId === f.id && m.cycleKey === c.key)) continue;
-      items.push({ label: f.name, date: due, amount: -f.amount, note: dShort(due), color: colorOf(f.category) });
+      if (due < from || due > to) continue;
+      if (S.skips.includes(f.id + '|' + c.key) || S.movements.some(m => m.fixedId === f.id && m.cycleKey === c.key)) continue;
+      out.push({ label: f.name, date: due, amount: -f.amount, note: dShort(due), color: colorOf(f.category) });
     }
   }
-  // pago de la tarjeta de crédito
   for (const s of cardStatements().list) {
     const plan = plannedPay(s);
-    if (s.left <= 0 || plan > monthEnd) continue;
-    const late = s.pay < today, behind = !late && plan < today;
-    items.push({ label: 'Pago tarjeta de crédito', date: late || behind ? today : plan, amount: -s.left,
+    if (s.left <= 0 || plan > to) continue;
+    const late = s.pay < from, behind = !late && plan < from;
+    out.push({ label: 'Pago tarjeta de crédito', date: late || behind ? from : plan, amount: -s.left,
       note: late ? 'VENCIDO el ' + dShort(s.pay) : (S.card.payMode === 'banco' ? dShort(plan) : 'con tu sueldo') + (s.closed ? ' · vence ' + dShort(s.pay) : ' · suma hasta el ' + dShort(s.close)),
       color: late ? 'var(--red)' : 'var(--amber)' });
   }
-  items.sort((a, b) => a.date.localeCompare(b.date) || b.amount - a.amount);
-  const cash = cashBalance();
-  const end = Math.round((cash + items.reduce((s, x) => s + x.amount, 0)) * 100) / 100;
-  // cuánto puedes gastar al día
-  let horizon, spendable;
-  if (salaryPending && payISO > today) {
-    horizon = payISO;
-    spendable = cash + items.filter(x => x.amount < 0 && x.date < payISO).reduce((s, x) => s + x.amount, 0);
-  } else {
-    horizon = iso(addDays(parse(monthEnd), 1));
-    // si el sueldo aún no llega, no cuentes con él para el gasto diario
-    spendable = salaryPending ? cash + items.filter(x => x.amount < 0).reduce((s, x) => s + x.amount, 0) : end;
+  return out;
+}
+// Lo que entra y sale de tu saldo desde hoy hasta fin de mes, y cuánto puedes gastar al día
+function upcoming() {
+  const now = new Date(), today = todayISO(), day = S.settings.cycleDay;
+  const monthEnd = iso(new Date(now.getFullYear(), now.getMonth() + 1, 0));
+  const cur = cycle(0), nxt = cycle(1);
+  // sueldo e ingresos esperados (no la tarjeta de alimentos, que no es saldo)
+  const payISO = iso(clampDate(now.getFullYear(), now.getMonth(), day));
+  const payCk = iso(cycleStartOf(parse(payISO), day));
+  const pend = [];
+  if ((payISO > today || payCk === cur.key) && payCk >= S.startFrom) {
+    for (const i of S.incomes) {
+      if (!(i.amount > 0) || i.category === 'Tarjeta alimentos' || incomeRegistered(i, payCk)) continue;
+      pend.push({ label: i.name, date: payISO, amount: i.amount, note: payISO > today ? 'aprox. ' + dShort(payISO) : 'por llegar', color: 'var(--green)' });
+    }
   }
+  const salaryPending = pend.length > 0;
+  // un sueldo que llegó antes se registra con fecha de inicio de tu mes: queda reservado hasta ese día
+  const futureInc = S.movements.filter(m => m.type === 'ingreso' && m.category !== 'Tarjeta alimentos' && m.date > today).map(m => m.date).sort()[0] || null;
+  let horizon, hastaTxt;
+  if (futureInc) { horizon = futureInc; hastaTxt = 'el inicio de tu mes (' + dShort(futureInc) + ')'; }
+  else if (salaryPending && payISO > today) { horizon = payISO; hastaTxt = 'tu sueldo (' + dShort(payISO) + ')'; }
+  else if (salaryPending) { horizon = iso(addDays(parse(monthEnd), 1)); hastaTxt = 'fin de mes'; }
+  else { horizon = nxt.start; hastaTxt = 'tu próximo sueldo (~' + dShort(nxt.start) + ')'; }
+  const lastDay = iso(addDays(parse(horizon), -1));
+  const outs = outflows(today, lastDay > monthEnd ? lastDay : monthEnd);
+  const items = [...pend, ...outs.filter(x => x.date <= monthEnd)].sort((a, b) => a.date.localeCompare(b.date) || b.amount - a.amount);
+  const cash = cashBalance(), cashToday = cashAt(today);
+  const end = Math.round((cash + items.reduce((a, x) => a + x.amount, 0)) * 100) / 100;
+  const spendable = Math.round((cashToday + outs.filter(x => x.date < horizon).reduce((a, x) => a + x.amount, 0)) * 100) / 100;
   const days = Math.max(1, daysBetween(today, horizon));
-  return { items, monthEnd, cash, end, horizon, spendable, days, daily: Math.max(0, spendable) / days, salaryPending };
+  return { items, monthEnd, cash, reserved: Math.round((cash - cashToday) * 100) / 100, end, horizon, hastaTxt, spendable, days, daily: Math.max(0, spendable) / days, salaryPending, futureInc };
 }
 /* ---------- Gasto diario con acumulado: monto fijo por día; lo que no gastas pasa a mañana ---------- */
 const isDaily = m => m.type === 'gasto' && CASH.includes(m.method) && !m.fixedId && !m.loan;
@@ -648,8 +658,16 @@ function vInicio() {
   // ingresos esperados de este mes
   let pend = '';
   if (cur && c.start >= S.startFrom) {
-    const miss = S.incomes.filter(i => i.amount > 0 && !S.movements.some(m => m.incomeId === i.id && m.cycleKey === c.key));
+    const miss = S.incomes.filter(i => i.amount > 0 && !incomeRegistered(i, c.key));
     if (miss.length) pend = `<div class="card"><h2>¿Ya cobraste?</h2><div class="cta">${miss.map(i => `<button class="btn outline sm" data-act="income" data-id="${i.id}">+ ${esc(i.name)} ${fmt(i.amount, 0)}</button>`).join('')}</div></div>`;
+  }
+  if (cur) {
+    const nx = cycle(1);
+    if (nx.start >= S.startFrom && daysBetween(todayISO(), nx.start) <= 7) {
+      const missN = S.incomes.filter(i => i.amount > 0 && !incomeRegistered(i, nx.key));
+      if (missN.length) pend += `<div class="card"><h2>¿Ya te depositaron?</h2><div class="sub" style="margin-bottom:10px">Si tu sueldo llegó antes del ${dShort(nx.start)}, regístralo aquí con el <b>monto real</b>: cuenta para tu mes que empieza el ${dShort(nx.start)} y no infla tu gasto de estos días.</div>
+        <div class="cta">${missN.map(i => `<button class="btn outline sm" data-act="income" data-next="1" data-id="${i.id}">+ ${esc(i.name)}</button>`).join('')}</div></div>`;
+    }
   }
   const firstUse = !S.movements.length ? `<div class="card info">Empieza tocando <b>Saldo disponible</b> para poner cuánto dinero tienes hoy (efectivo + cuenta + Yape). Desde el <b>${dShort(S.startFrom)}</b> tus gastos fijos se apuntan solos y aquí te aparecerá el botón para registrar tu sueldo.</div>` : '';
 
@@ -657,12 +675,12 @@ function vInicio() {
   let now2 = '';
   if (cur) {
     const D = dailyBudget(), u = D.u;
-    const hasta = u.salaryPending ? 'tu sueldo (' + dShort(u.horizon) + ')' : 'fin de mes';
+    const hasta = u.hastaTxt;
     const dailyTxt = u.spendable < 0
       ? `<span style="color:var(--red)">Te faltan ${fmt(-u.spendable, 0)} para cubrir lo pendiente${u.salaryPending ? ' antes del sueldo' : ''}</span>`
       : `Base: <b style="color:var(--text)">${fmt(D.base)} al día</b> hasta ${hasta}`;
     const pct = D.allowance > 0 ? Math.min(100, D.spentToday / D.allowance * 100) : 100;
-    const todayCard = u.spendable < 0 ? '' : `<div class="card"><h2>Hoy puedes gastar <span class="pill">${D.daysLeft} día${D.daysLeft > 1 ? 's' : ''} hasta ${u.salaryPending ? 'el ' + dShort(u.horizon) : 'fin de mes'}</span></h2>
+    const todayCard = u.spendable < 0 ? '' : `<div class="card"><h2>Hoy puedes gastar <span class="pill">${D.daysLeft} día${D.daysLeft > 1 ? 's' : ''} hasta el ${dShort(u.horizon)}</span></h2>
       <div class="big" style="color:${D.left < 0 ? 'var(--red)' : 'var(--gold2)'}">${D.left < 0 ? 'Te pasaste ' + fmt(-D.left) : fmtH(D.left)}</div>
       <div class="sub">${fmt(D.base)} diarios ${D.carry > 0.004 ? `<span style="color:var(--green)">+ ${fmt(D.carry)} que te sobró</span>` : D.carry < -0.004 ? `<span style="color:var(--red)">− ${fmt(-D.carry)} que te pasaste</span>` : ''}${D.spentToday ? ` · gastaste hoy ${fmt(D.spentToday)}` : ''}</div>
       <div class="bar ${D.left < 0 ? 'over' : pct >= 80 ? 'warn' : ''}"><i style="width:${pct}%"></i></div>
@@ -670,7 +688,7 @@ function vInicio() {
       <div class="sub mt8" style="font-size:12px">Cuenta lo que pagas en efectivo, débito o Yape/Plin (no la tarjeta de crédito, que tiene su tope, ni los gastos fijos).</div></div>`;
     const line = (dot, label, note, amt, cls = '') => `<div class="row"><i class="dot" style="background:${dot}"></i><div class="t"><b>${esc(label)}</b>${note ? `<span>${esc(note)}</span>` : ''}</div><div class="amt ${cls}">${amt}</div></div>`;
     now2 = `<div class="card kpi hero tap" data-act="setcash"><div class="lbl">Saldo disponible</div><div class="v ${u.cash >= 0 ? 'pos' : ''}">${fmtH(u.cash)}</div>
-        <div class="note">efectivo + cuenta + Yape/Plin · <span style="color:var(--gold)">toca para ajustar</span></div><div class="note" style="margin-top:8px">${dailyTxt}</div></div>${todayCard}
+        <div class="note">efectivo + cuenta + Yape/Plin · <span style="color:var(--gold)">toca para ajustar</span></div>${u.reserved > 0 ? `<div class="note" style="margin-top:4px">incluye <b style="color:var(--text)">${fmt(u.reserved, 0)}</b> de tu sueldo, reservado para tu mes desde el ${dShort(u.futureInc)}</div>` : ''}<div class="note" style="margin-top:8px">${dailyTxt}</div></div>${todayCard}
       <div class="card"><h2>Hasta fin de mes · ${dShort(u.monthEnd)}</h2>
         ${line('var(--muted)', 'Saldo hoy', '', fmt(u.cash))}
         ${u.items.map(x => line(x.color, x.label, x.note, (x.amount > 0 ? '+' : '−') + fmt(Math.abs(x.amount)), x.amount > 0 ? 'in' : '')).join('')}
@@ -1070,7 +1088,7 @@ function vAjustes() {
     <div class="sub" style="margin-bottom:12px">Tus datos viven solo en este iPhone. Guarda una copia en Archivos o iCloud de vez en cuando.</div>
     <div class="cta"><button class="btn gold" data-act="export">Exportar copia</button><button class="btn" data-act="import">Importar copia</button><button class="btn" data-act="csv">Exportar a Excel (CSV)</button></div>
     <button class="btn danger block mt" data-act="reset">Borrar todo</button></div>
-  <div class="sub" style="text-align:center;margin:18px 0">Finanzas · v9</div>`;
+  <div class="sub" style="text-align:center;margin:18px 0">Finanzas · v10</div>`;
 }
 
 /* ================= Formularios ================= */
@@ -1192,8 +1210,9 @@ const actions = {
     if (m.type === 'pago_tarjeta') cardPayForm({ ...m }); else movForm({ ...m });
   },
   income(el) {
-    const i = S.incomes.find(x => x.id === el.dataset.id); const c = cycle(0);
-    movForm({ type: 'ingreso', amount: i.amount, category: i.category, note: i.name === i.category ? '' : i.name, incomeId: i.id, cycleKey: c.key });
+    const i = S.incomes.find(x => x.id === el.dataset.id), early = el.dataset.next === '1', c = cycle(early ? 1 : 0);
+    movForm({ type: 'ingreso', amount: i.amount, category: i.category, incomeId: i.id, cycleKey: c.key,
+      date: early ? c.start : todayISO(), note: early ? 'depositado el ' + dShort(todayISO()) : (i.name === i.category ? '' : i.name) });
   },
   payfixed(el) {
     const f = S.fixed.find(x => x.id === el.dataset.id); const c = cycle(0);

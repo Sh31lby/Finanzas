@@ -1,7 +1,7 @@
 // Guarda la app para que abra sin conexión. Sube VERSION cuando cambies archivos.
 // La página (index.html) se pide SIEMPRE primero a internet, así cada cambio se ve al abrir;
 // la copia guardada solo se usa sin conexión.
-const VERSION = 'finanzas-v9';
+const VERSION = 'finanzas-v10';
 const FILES = ['./', './index.html', './manifest.webmanifest',
   './icons/apple-touch-icon.png', './icons/icon-192.png', './icons/icon-512.png', './icons/favicon.png'];
 
