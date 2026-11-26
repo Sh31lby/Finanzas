@@ -612,7 +612,7 @@ function applyTheme() {
 function render() {
   applyTheme();
   document.querySelectorAll('nav.tabs button').forEach(b => b.classList.toggle('on', b.dataset.tab === tab));
-  $('#fab').classList.toggle('hide', tab === 'ajustes');
+  $('#fab').classList.toggle('hide', tab === 'ajustes' || tab === 'analisis');
   $('#app').innerHTML = ({ inicio: vInicio, movs: vMovs, analisis: vAnalisis, deudas: vDeudas, ajustes: vAjustes })[tab]();
   if (tab === 'deudas') updateSim();
 }
@@ -858,7 +858,9 @@ function cashAt(dateISO) {
 // promedio de gasto mensual: últimos 3 meses completos con datos (si no hay, el mes actual)
 function avgMonthly() {
   const vals = [-1, -2, -3].map(k => totals(cycle(k)).exp).filter(v => v > 0);
-  return vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : totals(cycle(0)).exp;
+  const v = vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : totals(cycle(0)).exp;
+  // sin historial: tus fijos + ~S/ 45 al día como estimado
+  return v > 0 ? v : S.fixed.filter(f => f.active && f.amount > 0).reduce((a, f) => a + f.amount, 0) + 45 * 30;
 }
 function goalSaved(g) {
   return Math.round((g.base + S.movements.filter(m => m.type === 'ahorro' && m.goalId === g.id).reduce((a, m) => a + m.amount, 0)) * 100) / 100;
@@ -1093,7 +1095,7 @@ function vAjustes() {
     <div class="sub" style="margin-bottom:12px">Tus datos viven solo en este iPhone. Guarda una copia en Archivos o iCloud de vez en cuando.</div>
     <div class="cta"><button class="btn gold" data-act="export">Exportar copia</button><button class="btn" data-act="import">Importar copia</button><button class="btn" data-act="csv">Exportar a Excel (CSV)</button></div>
     <button class="btn danger block mt" data-act="reset">Borrar todo</button></div>
-  <div class="sub" style="text-align:center;margin:18px 0">Finanzas · v11</div>`;
+  <div class="sub" style="text-align:center;margin:18px 0">Finanzas · v12</div>`;
 }
 
 /* ================= Formularios ================= */
@@ -1174,11 +1176,11 @@ function goalForm(g) {
     ${x.emergency ? '' : `<span class="f-lbl">Nombre</span><input class="inp" id="g-name" value="${esc(x.name)}" placeholder="ej. Viaje, laptop, adelanto del crédito">`}
     ${x.emergency ? `<input type="hidden" id="g-name" value="Fondo de emergencia"><span class="f-lbl">¿Cuántos meses de gastos quieres cubrir?</span>
       <select class="inp" id="g-months">${[3, 4, 6].map(m => `<option value="${m}" ${x.months === m ? 'selected' : ''}>${m} meses (${fmt(avgMonthly() * m, 0)})</option>`).join('')}</select>` : ''}
-    <div class="f2"><div><span class="f-lbl">Objetivo (S/)</span><input class="inp" id="g-target" inputmode="decimal" value="${x.target || ''}" placeholder="0.00" ${x.emergency ? 'readonly' : ''}></div>
-    <div><span class="f-lbl">Ya tengo ahorrado</span><input class="inp" id="g-saved" inputmode="decimal" value="${isNew ? '' : goalSaved(x)}" placeholder="0.00"></div></div>
+    <div class="f2"><div><span class="f-lbl">Objetivo (S/)</span><input class="inp" id="g-target" inputmode="decimal" value="${x.target || ''}" placeholder="0.00"></div>
+    <div><span class="f-lbl">Ya ahorrado en otra cuenta</span><input class="inp" id="g-saved" inputmode="decimal" value="${isNew ? '' : goalSaved(x)}" placeholder="0.00"></div></div>
     ${x.emergency ? '' : `<span class="f-lbl">Fecha meta (opcional)</span><input class="inp" type="date" id="g-date" value="${x.deadline || ''}">`}
     <button class="btn gold block mt" data-act="goalsave">Guardar</button>
-    ${isNew ? '' : '<button class="btn danger block mt8" data-act="goaldelete">Eliminar</button>'}`);
+    ${isNew ? '' : `<button class="btn outline block mt8" data-act="goaladd" data-id="${x.id}">Aportar o retirar</button><button class="btn danger block mt8" data-act="goaldelete">Eliminar</button>`}`);
   if ($('#g-months')) $('#g-months').addEventListener('change', e => { $('#g-target').value = Math.round(avgMonthly() * Number(e.target.value) / 100) * 100; });
 }
 
@@ -1257,7 +1259,6 @@ const actions = {
     const saved = num($('#g-saved').value) || 0;
     g.base = Math.round((g.base + saved - goalSaved(g)) * 100) / 100;
     g.deadline = $('#g-date') ? $('#g-date').value : ''; if ($('#g-months')) g.months = parseInt($('#g-months').value) || 3;
-    if (g.emergency && $('#g-months')) g.target = Math.round(avgMonthly() * g.months / 100) * 100 || g.target;
     if (!(g.target > 0)) { toast('Pon un monto objetivo'); return; }
     const i = S.goals.findIndex(x => x.id === g.id); if (i >= 0) S.goals[i] = g; else S.goals.push(g);
     save(); closeSheet(); render(); toast('Meta guardada');
